@@ -172,8 +172,8 @@ adb shell input keyevent KEYCODE_WAKEUP
 ```
 E:\App\
 ├── Senior/              # Smart Frame 앱 (수신측 - 현재 프로젝트)
-├── Caller/              # 가족 앱 (발신측 - Phase 4에서 생성)
-└── web-test-caller/     # 웹 테스트 페이지 (Phase 3 개발용, 임시)
+│   └── web-test-caller\ # 웹 테스트 페이지 (발신 + 사진 업로드)
+└── Caller/              # 가족 앱 (발신측 - Phase 4에서 생성)
 ```
 
 ### 구현 Phase
@@ -195,7 +195,7 @@ E:\App\
 - `lib/services/webrtc_service.dart` (신규) — WebRTC 피어 연결
 - `lib/services/signaling_service.dart` (신규) — Firebase Realtime DB 시그널링
 - `lib/screens/video_call_screen.dart` (신규) — 양방향 영상 통화 UI
-- `E:\App\web-test-caller\index.html` — 브라우저 발신 테스트 페이지
+- `E:\App\Senior\web-test-caller\index.html` — 브라우저 발신 테스트 페이지
 
 #### Phase 4: 가족 앱 (발신측 - 최종)
 - `E:\App\Caller\` — 별도 Flutter 프로젝트
@@ -245,3 +245,216 @@ just_audio: ^0.9.36
 flutter_tts: ^0.67.0
 permission_handler: ^11.4.0
 ```
+
+---
+
+## Firebase 사진 관리 기능 (2026-03-05)
+
+### Context
+
+현재 슬라이드쇼 사진은 **APK에 빌드 시 포함된 정적 에셋** (`assets/images/`).
+사진 변경하려면 코드에 파일 추가 → 빌드 → 재설치 필요.
+Firebase Storage + RTDB를 활용해 **원격으로 사진을 관리**하고 **실시간 동기화**하는 기능 추가.
+
+### 사용자 구분 (향후)
+
+| 역할 | 기기 | 로그인 | 기능 |
+|------|------|--------|------|
+| **시니어** | 태블릿 (키오스크 모드) | 불필요 | 사진 표시 + 영상통화 수신 |
+| **자식** | 핸드폰 (여러명) | 필요 | 사진 업로드 + 영상통화 발신 |
+
+현재 단계: 테스트용 웹 페이지로 업로드
+
+### 아키텍처
+
+```
+[자식 핸드폰/웹]                    [Firebase]                    [시니어 태블릿]
+     │                                │                                │
+     │  사진 업로드                    │                                │
+     ├──→ Firebase Storage ──────────┤                                │
+     │    /photos/{deviceId}/        │                                │
+     │                                │                                │
+     │  메타데이터 저장               │   실시간 리스너                │
+     ├──→ RTDB /photos/{deviceId}/ ──┼──────────────────────────────→ │
+     │    {url, name, timestamp}     │                                │
+     │                                │    새 사진 감지 → 다운로드     │
+     │                                │    → 로컬 캐시 → 슬라이드쇼   │
+```
+
+### 동작 흐름
+
+```
+1. 자식이 사진 업로드
+   → Firebase Storage에 파일 저장
+   → RTDB /photos/{deviceId}/{photoId}에 메타데이터 저장
+
+2. 시니어 태블릿 (실시간 리스너)
+   → RTDB 변경 감지
+   → Storage에서 다운로드 → 로컬 캐시 저장
+   → 슬라이드쇼에 즉시 반영
+
+3. 사진 삭제 시
+   → RTDB에서 메타데이터 삭제
+   → 태블릿이 감지 → 로컬 캐시에서도 삭제
+   → 슬라이드쇼에서 즉시 제거
+```
+
+### RTDB 데이터 구조
+
+```
+Firebase RTDB
+├── /devices/{deviceId}/     ← 기존 (기기 등록/온라인 상태)
+├── /calls/{callId}/         ← 기존 (영상통화 시그널링)
+└── /photos/{deviceId}/      ← 신규 (사진 메타데이터)
+      └── {photoId}/
+            ├── url: "https://firebasestorage.googleapis.com/..."
+            ├── name: "family_photo.jpg"
+            ├── size: 2048000
+            ├── uploadedBy: "child_user_uid"
+            ├── uploadedAt: 1709654400000  (ServerValue.timestamp)
+            └── order: 1  (슬라이드쇼 순서, optional)
+```
+
+### 구현 단계
+
+#### Step 1: Firebase Storage 설정 + 패키지 추가
+- `pubspec.yaml`에 `firebase_storage`, `path_provider` 추가
+- Firebase Console에서 Storage 활성화 + 규칙 설정
+
+#### Step 2: PhotoService 신규 작성
+
+```dart
+// lib/services/photo_service.dart
+class PhotoService {
+  // RTDB /photos/{deviceId}/ 실시간 리스너
+  void listenForPhotos(String deviceId, Function(List<PhotoItem>) onUpdate);
+
+  // Firebase Storage에서 다운로드 → 로컬 캐시
+  Future<File> downloadAndCache(String url, String photoId);
+
+  // 로컬 캐시된 사진 목록 반환
+  Future<List<File>> getCachedPhotos();
+
+  // 캐시 정리 (삭제된 사진)
+  Future<void> cleanupCache(List<String> activePhotoIds);
+
+  void dispose();
+}
+```
+
+#### Step 3: SlideshowScreen 수정
+
+```
+앱 시작 → PhotoService.listenForPhotos()
+  ├── Firebase 사진 있음 → 다운로드/캐시 → 슬라이드쇼
+  └── Firebase 사진 없음 → 기존 assets/images/ 폴백
+```
+
+#### Step 4: PhotoFrameView 수정
+
+```dart
+// 로컬 캐시 파일이면 Image.file(), 에셋이면 Image.asset()
+child: isAsset
+  ? Image.asset(imagePath, fit: BoxFit.contain, ...)
+  : Image.file(File(imagePath), fit: BoxFit.contain, ...)
+```
+
+#### Step 5: 테스트 업로드 웹 페이지
+
+```
+E:\App\Senior\web-test-caller\photo-upload.html
+  ├── 기기 선택 (RTDB /devices/ 에서 온라인 기기 목록)
+  ├── 사진 파일 선택 (multiple)
+  ├── Firebase Storage 업로드 → URL 획득
+  └── RTDB /photos/{deviceId}/ 에 메타데이터 저장
+```
+
+### 수정 파일 요약
+
+| 파일 | 작업 | 설명 |
+|------|------|------|
+| `pubspec.yaml` | 수정 | firebase_storage, path_provider 추가 |
+| `lib/services/photo_service.dart` | 신규 | 사진 동기화 서비스 (RTDB 리스너 + Storage 다운로드 + 로컬 캐시) |
+| `lib/models/photo_item.dart` | 신규 | 사진 메타데이터 모델 클래스 |
+| `lib/screens/slideshow_screen.dart` | 수정 | PhotoService 연동, Firebase/에셋 분기 |
+| `lib/widgets/photo_frame_view.dart` | 수정 | Image.file() 지원 추가 |
+| `web-test-caller\photo-upload.html` | 신규 | 테스트용 웹 업로드 페이지 |
+
+### Firebase Storage 규칙
+
+```
+// 테스트 단계 (인증 없이 누구나 읽기/쓰기)
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /photos/{deviceId}/{allPaths=**} {
+      allow read: if true;
+      allow write: if true;
+    }
+  }
+}
+
+// 프로덕션 (인증된 사용자만 쓰기)
+// allow write: if request.auth != null;
+```
+
+### 비용 분석
+
+#### 4대 (현재 개발/테스트) — 무료 (Spark Plan)
+
+| 항목 | 무료 한도 | 예상 사용량 |
+|------|-----------|------------|
+| Storage 저장 | 5GB | ~300MB |
+| Storage 다운로드 | 1GB/일 | ~1.2GB (최초 1회) |
+| RTDB 동시연결 | 100개 | 4개 |
+| FCM | 무제한 | 수 회/주 |
+
+#### 1000대 양산 (Blaze Plan) — ~$15/월 (~20,000원)
+
+가정: 가정당 100장(평균 3MB), 주 5장 신규, 영상통화 주 2~3회(5분)
+
+| 항목 | 계산 | 월 비용 |
+|------|------|---------|
+| Storage 저장 | 1000 × 300MB = 300GB | $7.80 |
+| Storage 다운로드 (신규) | 1000 × 60MB = 60GB/월 | $7.20 |
+| RTDB 저장 | ~20MB (메타데이터) | $0 |
+| RTDB 다운로드 | ~200MB (메타 + 시그널링) | $0 |
+| RTDB 동시연결 | 1000개 (Blaze 200K 무료) | $0 |
+| 영상통화 (WebRTC P2P) | Firebase 안 거침 | $0 |
+| FCM 푸시 | 10,000회/월 | $0 |
+| **월 합계** | | **~$15** |
+
+최초 배포 시 1000대 일괄 다운로드: +$36 (1회성)
+
+**대당 월 20원. 핵심은 로컬 캐시 관리** (캐시 깨지면 재다운로드 비용 발생).
+
+#### 비용 리스크
+
+| 시나리오 | 추가 비용 |
+|---------|----------|
+| 캐시 전부 깨짐 (1000대 × 300MB) | +$36/회 |
+| 사진 1000장으로 증가 | 저장 $26/월 |
+| 영상통화 빈도 증가 | 영향 없음 (P2P) |
+
+### Firebase vs Supabase 비교
+
+| 항목 | Firebase | Supabase |
+|------|----------|----------|
+| 실시간 DB | RTDB (매우 빠름) | Realtime (Postgres 기반) |
+| onDisconnect | 네이티브 지원 (사용 중) | 없음 |
+| 오프라인 동기화 | RTDB 자동 캐시 | 없음 |
+| FCM 푸시 | 기본 내장 (사용 중) | 별도 서비스 필요 |
+| 시그널링 속도 | ms 단위 | 상대적 느림 |
+| 1000대 비용 | ~$15/월 | ~$25/월 (Pro 고정) |
+
+**결론: Firebase 유지.** 시그널링/FCM/onDisconnect 모두 Firebase 기반 구현 완료.
+향후 자식 앱이 복잡해지면 자식 앱 백엔드만 Supabase 하이브리드 가능.
+
+### 검증 방법
+
+1. `flutter build apk --release` 빌드 성공
+2. 웹 업로드 페이지에서 사진 업로드
+3. 태블릿 앱 시작 → 실시간으로 새 사진 슬라이드쇼 추가 확인
+4. Firebase Console에서 사진 삭제 → 슬라이드쇼에서 제거 확인
+5. Firebase 사진 전부 삭제 → 기존 에셋 이미지 폴백 확인
+6. 앱 재시작 → 캐시된 사진 즉시 표시 (재다운로드 없이)

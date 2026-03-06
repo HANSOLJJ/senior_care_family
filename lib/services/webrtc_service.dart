@@ -33,6 +33,7 @@ class WebRtcService {
   String? _callId;
   bool _isHungUp = false;
   Timer? _disconnectTimer;
+  Timer? _aecStatsTimer;
 
   /// 상대방 끊김 감지 시 호출되는 콜백
   void Function()? onCallEnded;
@@ -162,6 +163,33 @@ class WebRtcService {
     });
 
     print('WebRTC: 통화 연결 완료');
+    _startAecStats();
+  }
+
+  /// AEC 메트릭 로깅 시작 (5초 간격)
+  void _startAecStats() {
+    _aecStatsTimer?.cancel();
+    _aecStatsTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      final pc = _peerConnection;
+      if (pc == null) return;
+      try {
+        final stats = await pc.getStats();
+        for (final report in stats) {
+          final v = report.values;
+          if (v.containsKey('echoReturnLoss')) {
+            print('AEC stats: ERL=${v['echoReturnLoss']}dB ERLE=${v['echoReturnLossEnhancement']}dB');
+          }
+          if (report.type == 'media-source' && v.containsKey('audioLevel')) {
+            print('AEC stats: audioLevel=${v['audioLevel']} totalAudioEnergy=${v['totalAudioEnergy']}');
+          }
+        }
+      } catch (_) {}
+    });
+  }
+
+  void _stopAecStats() {
+    _aecStatsTimer?.cancel();
+    _aecStatsTimer = null;
   }
 
   /// 발신 처리: offer를 생성하여 전송하고 answer를 기다림
@@ -266,6 +294,7 @@ class WebRtcService {
     });
 
     print('WebRTC: 발신 완료, answer 대기 중 callId=$callId');
+    _startAecStats();
     return callId;
   }
 
@@ -275,6 +304,7 @@ class WebRtcService {
     _isHungUp = true;
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
+    _stopAecStats();
     print('WebRTC: 통화 종료');
 
     // 로컬 트랙 정지

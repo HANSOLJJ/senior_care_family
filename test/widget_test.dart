@@ -1,6 +1,6 @@
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:senior_win/main.dart';
+import 'package:senior_care_family/main.dart';
 
 void main() {
   testWidgets('SmartFrameApp renders', (WidgetTester tester) async {

@@ -8,7 +8,7 @@
 - `onDisconnect().update({online: false})` — 앱 종료/네트워크 끊김 시 자동 offline
 - `signaling_service.dart`: `listenForIncomingCalls(myDeviceId:)` — `targetDeviceId` 불일치 통화 무시
 - `fcm_service.dart`: FCM 토큰을 `/devices/{deviceId}/fcmToken`에 자동 저장
-- `web-test-caller/index.html`: 기기 목록 드롭다운 + `targetDeviceId` 포함 발신
+- `web-test-caller\index.html`: 기기 목록 드롭다운 + `targetDeviceId` 포함 발신
 
 ### Part B: 세션 정리 강화
 - `webrtc_service.dart`: `onConnectionState` disconnected → 5초 대기 → 자동 hangUp + `onCallEnded` 콜백
@@ -16,7 +16,7 @@
 - `hangUp()`: `endCall()` 후 2초 지연 → `cleanupCall()` (상대방 감지 시간 확보)
 - `answerCall()` + `makeCall()` 모두 `listenForCallEnd()` 추가 — 양쪽 종료 감지
 - `cleanupStaleCalls()`: 앱 시작 시 5분+ 잔존 통화 자동 삭제
-- `web-test-caller`: `beforeunload` + `onDisconnect()` + 상대방 종료 감시
+- `web-test-caller\index.html`: `beforeunload` + `onDisconnect()` + 상대방 종료 감시
 
 ### Part C: 기기 ID 표시
 - `slideshow_screen.dart`: 좌측 하단에 `모델명 (deviceId)` 반투명 표시 (임시)
