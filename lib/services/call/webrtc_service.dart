@@ -193,7 +193,7 @@ class WebRtcService {
   }
 
   /// 발신 처리: offer를 생성하여 전송하고 answer를 기다림
-  Future<String> makeCall(String targetDeviceId) async {
+  Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName}) async {
     _isHungUp = false;
     print('WebRTC: 발신 시작 → target=$targetDeviceId');
 
@@ -262,10 +262,12 @@ class WebRtcService {
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
 
-    // 5. 시그널링 서버에 통화 생성 (targetDeviceId 포함)
+    // 5. 시그널링 서버에 통화 생성 (targetDeviceId + caller 정보 포함)
     final callId = await _signaling.createCall(
       {'sdp': offer.sdp, 'type': offer.type},
       targetDeviceId: targetDeviceId,
+      callerUid: callerUid,
+      callerName: callerName,
     );
     _callId = callId;
     resolvedCallId = callId;
@@ -324,6 +326,8 @@ class WebRtcService {
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
     _stopAecStats();
+    // 자기 hangUp 시 listenForCallEnd 콜백 방지
+    onCallEnded = null;
     print('WebRTC: 통화 종료');
 
     // 로컬 트랙 정지

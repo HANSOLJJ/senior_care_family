@@ -71,6 +71,12 @@ class FamilyService {
     }).toList();
   }
 
+  /// 현재 사용자의 멤버십 실시간 감시 (제거 감지용)
+  Stream<DatabaseEvent> watchMyMembership(String familyId) {
+    final uid = _auth.currentUser!.uid;
+    return _db.ref('families/$familyId/members/$uid').onValue;
+  }
+
   /// 가족 그룹 탈퇴
   Future<void> leaveFamily(String familyId) async {
     final user = _auth.currentUser;

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
@@ -37,7 +38,12 @@ class _OutgoingCallScreenState extends State<OutgoingCallScreen> {
   Future<void> _startCall() async {
     try {
       await _webrtc.initialize();
-      await _webrtc.makeCall(widget.targetDeviceId);
+      final user = FirebaseAuth.instance.currentUser;
+      await _webrtc.makeCall(
+        widget.targetDeviceId,
+        callerUid: user?.uid,
+        callerName: user?.displayName ?? '가족',
+      );
 
       // 30초 타임아웃
       _timeoutTimer = Timer(const Duration(seconds: 30), () {

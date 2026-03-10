@@ -1,0 +1,17 @@
+{
+  "model": "SM-T500",
+  "name": "Galaxy Tab A7",
+  "display": {
+    "width": 2000,
+    "height": 1200,
+    "density": 224
+  },
+  "photo": {
+    "maxResolution": 2000,
+    "jpegQuality": 80
+  },
+  "storage": {
+    "maxPhotos": 500,
+    "maxTotalMB": 5000
+  }
+}

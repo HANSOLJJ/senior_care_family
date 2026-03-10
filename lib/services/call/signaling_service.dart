@@ -92,21 +92,25 @@ class SignalingService {
     });
   }
 
-  /// SDP offer 저장 (발신측) — targetDeviceId 포함
+  /// SDP offer 저장 (발신측) — targetDeviceId + caller 정보 포함
   Future<String> createCall(
     Map<String, dynamic> offer, {
     required String targetDeviceId,
+    String? callerUid,
+    String? callerName,
   }) async {
     final callRef = _db.child('calls').push();
     final callId = callRef.key!;
     await callRef.set({
       'offer': offer,
       'targetDeviceId': targetDeviceId,
+      'callerUid': callerUid,
+      'callerName': callerName ?? '가족',
       'status': 'ringing',
       'createdAt': ServerValue.timestamp,
     });
     _currentCallId = callId;
-    print('시그널링: 통화 생성 callId=$callId → target=$targetDeviceId');
+    print('시그널링: 통화 생성 callId=$callId → target=$targetDeviceId, caller=$callerName');
     return callId;
   }
 

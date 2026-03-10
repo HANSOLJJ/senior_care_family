@@ -1,5 +1,7 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'config/app_config.dart';
 import 'services/family_service.dart';
 import 'screens/login_screen.dart';
@@ -75,6 +77,7 @@ class _PairingGateState extends State<_PairingGate> {
   final _familyService = FamilyService();
   List<String>? _familyIds;
   bool _loading = true;
+  StreamSubscription<DatabaseEvent>? _membershipSub;
 
   @override
   void initState() {
@@ -83,13 +86,54 @@ class _PairingGateState extends State<_PairingGate> {
   }
 
   Future<void> _checkPairing() async {
+    // 기존 리스너 정리
+    _membershipSub?.cancel();
+    _membershipSub = null;
+
     try {
       final ids = await _familyService.getMyFamilyIds();
-      if (mounted) setState(() { _familyIds = ids; _loading = false; });
+      if (mounted) {
+        setState(() { _familyIds = ids; _loading = false; });
+        // 멤버십 실시간 감시 시작
+        if (ids.isNotEmpty) {
+          _watchMembership(ids.first);
+        }
+      }
     } catch (e) {
       print('페어링 확인 실패: $e');
       if (mounted) setState(() { _familyIds = []; _loading = false; });
     }
+  }
+
+  /// Senior에서 멤버 삭제 시 실시간 감지
+  void _watchMembership(String familyId) {
+    _membershipSub = _familyService.watchMyMembership(familyId).listen((event) {
+      if (!event.snapshot.exists) {
+        // 멤버에서 제거됨
+        print('멤버십 제거 감지: familyId=$familyId');
+        _membershipSub?.cancel();
+        _membershipSub = null;
+
+        // 로컬 familyId 정리
+        _familyService.leaveFamily(familyId);
+
+        if (mounted) {
+          setState(() { _familyIds = []; });
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('시니어 기기에서 연결이 해제되었습니다'),
+              duration: Duration(seconds: 4),
+            ),
+          );
+        }
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _membershipSub?.cancel();
+    super.dispose();
   }
 
   @override
