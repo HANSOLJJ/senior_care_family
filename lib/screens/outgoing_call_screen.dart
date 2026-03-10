@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import '../services/signaling_service.dart';
-import '../services/webrtc_service.dart';
+import '../services/call/signaling_service.dart';
+import '../services/call/webrtc_service.dart';
 
 /// 발신 대기 → 영상통화 화면
 class OutgoingCallScreen extends StatefulWidget {

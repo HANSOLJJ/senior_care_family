@@ -59,3 +59,13 @@ logs/
 
 # IDE
 *.iml
+
+# API keys / secrets
+social_auth_config.json
+google-services.json
+
+# Firebase service account keys
+functions/*-adminsdk-*.json
+
+# Build reports
+android/build/

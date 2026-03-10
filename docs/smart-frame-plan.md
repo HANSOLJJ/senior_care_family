@@ -1,460 +1,418 @@
-# Smart Photo Frame App 구현 계획
+# Senior Care Family App - 구현 계획
 
-## Context
-현재 Flutter 기본 카운터 앱(`senior_win`)을 **스마트 액자 앱**으로 변환한다.
-주 타겟은 Android. assets에 번들된 사진들을 10초 간격으로 슬라이드쇼로 보여주며, 화면이 절대 꺼지지 않아야 한다.
+## 개요
 
-## 구현 접근법
-- **StatefulWidget + Timer.periodic + AnimatedSwitcher** 조합
-- `Timer.periodic`으로 10초마다 인덱스 변경 → `AnimatedSwitcher`가 페이드 전환 처리
-- `wakelock_plus` 패키지로 화면 꺼짐 방지
-- `SystemChrome.setEnabledSystemUIMode(immersiveSticky)`로 전체화면
+Senior Care 시스템의 가족(자식)용 앱.
+시니어 태블릿에 영상통화 발신 + 사진 업로드 + 복약 알림 설정 + 기기 관리.
 
-## 파일 변경 목록
-
-### 1. `assets/images/` 디렉토리 생성 + 플레이스홀더 이미지
-- 디렉토리 생성
-- 테스트용 컬러 플레이스홀더 PNG 3장 생성 (핑크, 블루, 그린 / 800x600)
-
-### 2. `pubspec.yaml` 수정
-- `wakelock_plus: ^1.4.0` 의존성 추가
-- `assets/images/` 에셋 선언 추가
-
-### 3. `android/app/src/main/AndroidManifest.xml` 수정
-- `<uses-permission android:name="android.permission.WAKE_LOCK"/>` 추가
-
-### 4. `lib/widgets/photo_frame_view.dart` 신규 생성
-- `AnimatedSwitcher` + `Image.asset` 표시 위젯
-- 검정 배경, `BoxFit.contain`, 페이드 전환 (800ms)
-
-### 5. `lib/screens/slideshow_screen.dart` 신규 생성
-- 이미지 경로 리스트 관리
-- `Timer.periodic` (10초) → `_currentIndex` 순환
-- `initState`: WakelockPlus.enable(), immersive fullscreen 설정
-- `dispose`: timer cancel, wakelock disable, UI 복원
-
-### 6. `lib/main.dart` 전면 재작성
-- `SmartFrameApp` → `MaterialApp(dark theme)` → `SlideshowScreen`
-- `debugShowCheckedModeBanner: false`
-
-### 7. `test/widget_test.dart` 업데이트
-- 기존 MyApp 참조 → SmartFrameApp으로 변경
-
-## 구현 순서
-1. `assets/images/` 디렉토리 생성 + 플레이스홀더 이미지 3장 생성
-2. `pubspec.yaml` 수정 (의존성 + 에셋)
-3. `flutter pub get` 실행
-4. `AndroidManifest.xml` 수정 (WAKE_LOCK 권한)
-5. `lib/widgets/photo_frame_view.dart` 생성
-6. `lib/screens/slideshow_screen.dart` 생성
-7. `lib/main.dart` 재작성
-8. `flutter run` 으로 테스트
+Senior 앱(Android Native, Kotlin)과 Firebase를 공유하며,
+페어링 시스템으로 가족 그룹을 형성한다.
 
 ---
 
-## 검증 결과 (2026-02-06)
+## Phase 1: 시니어 전용 코드 제거 — **완료**
 
-### 환경
-- Flutter 3.38.9 (stable), Dart 3.10.8
-- 에뮬레이터: Medium Phone API 36.1 (Android 16, API 36)
+### 완료 항목
+- [x] `lib/services/face_detection_service.dart` 삭제
+- [x] `lib/screens/slideshow_screen.dart` 삭제
+- [x] `lib/screens/incoming_call_screen.dart` 삭제
+- [x] `android/.../BootReceiver.kt` 삭제
+- [x] `pubspec.yaml`에서 `camera`, `google_mlkit_face_detection`, `flutter_tts` 제거
+- [x] `AndroidManifest.xml`에서 HOME intent-filter, BootReceiver, BOOT_COMPLETED 권한 제거
+- [x] `MainActivity.kt` 간소화 (화면 켜기/잠금해제 코드 제거)
+- [x] `main.dart` 재작성 (SeniorCareFamily, DeviceListScreen 홈)
+- [x] 패키지명 변경: `com.seniorcare.family`
+- [x] 빌드 + 설치 + 동작 확인 완료
 
-### 빌드 검증
-| 항목 | 결과 |
-|------|------|
-| `flutter pub get` | 성공 (wakelock_plus 1.4.0 설치) |
-| `flutter analyze` | **No issues found!** |
-| `flutter run -d emulator-5554` | APK 빌드 및 설치 성공 (739ms) |
-
-### 기능 검증
-| 항목 | 결과 |
-|------|------|
-| 전체화면 몰입 모드 | 상태바/네비게이션바 숨김 확인 (`immersiveSticky`) |
-| 슬라이드쇼 전환 | 10초 간격 페이드 전환 작동 확인 |
-| Wake Lock 활성화 | `SCREEN_BRIGHT_WAKE_LOCK` 활성 확인 (`adb shell dumpsys power`) |
-| Wake Lock 테스트 | 화면 타임아웃 15초 설정 후 앱 실행 중 화면 안 꺼짐 확인 |
-| Wake Lock 해제 테스트 | 홈으로 나간 후 15초 뒤 화면 꺼짐 확인 |
-
-### 검증에 사용한 ADB 명령어
-```bash
-# 화면 타임아웃 15초로 설정
-adb shell settings put system screen_off_timeout 15000
-
-# 현재 타임아웃 확인
-adb shell settings get system screen_off_timeout
-
-# Wake Lock 활성 상태 확인
-adb shell dumpsys power | grep -A 5 "Wake Locks: size"
-
-# 홈 버튼 (immersive 모드에서 네비바 안 보일 때)
-adb shell input keyevent KEYCODE_HOME
-
-# 화면 깨우기
-adb shell input keyevent KEYCODE_WAKEUP
-```
-
-### 참고 사항
-- Kotlin 증분 컴파일 캐시 경고 발생 (C: vs E: 드라이브 차이) — 빌드/기능에 영향 없음
-- `immersiveSticky` 모드에서 하단 스와이프로 네비게이션바 일시 표시 가능
-- Windows에서 `SystemChrome.setEnabledSystemUIMode`는 no-op (정상)
-
----
-
-## 키오스크 모드 추가 (2026-02-20)
-
-### 방식: 홈 런처 등록 + 부팅 자동실행
-
-**홈 런처**로 등록하면 홈 버튼을 눌러도 이 앱으로 돌아오고,
-**부팅 자동실행**으로 태블릿이 켜지면 바로 앱이 뜬다.
-
-### 변경 파일
-
-#### 1. `android/app/src/main/AndroidManifest.xml`
-- `RECEIVE_BOOT_COMPLETED` 권한 추가
-- 홈 런처 intent-filter 추가 (`HOME` + `DEFAULT` 카테고리)
-- `BootReceiver` BroadcastReceiver 선언
-
-#### 2. `android/app/src/main/kotlin/.../BootReceiver.kt` (신규)
-- `BOOT_COMPLETED` 인텐트 수신 시 `MainActivity` 자동 실행
-
-### 동작 방식
-1. **부팅 완료** → Android가 `BOOT_COMPLETED` 브로드캐스트 발송
-2. **BootReceiver** 수신 → `MainActivity` 시작 (FLAG_ACTIVITY_NEW_TASK)
-3. **홈 버튼** → HOME 카테고리로 등록되어 있으므로 이 앱으로 복귀
-4. 첫 설치 시 "홈 앱 선택" 다이얼로그 → 이 앱을 "항상"으로 선택
-
-### 해제 방법
-- 태블릿 설정 > 앱 > 기본 앱 > 홈 앱 → 다른 런처로 변경
-- 또는 앱 삭제 시 자동 해제
-
-### 빌드 검증
-- `flutter analyze` — 에러 없음 (print 경고만 존재, 디버깅용)
-
----
-
-## Privacy-Safe Auto Answer (사생활 보호 자동 수신) 추가 (2026-02-23)
-
-### Context
-슬라이드쇼 + 키오스크 모드에 **영상 통화 자동 수신** 기능을 추가한다.
-가족용 별도 모바일 앱에서 전화를 걸면, 스마트 액자가 전방 얼굴을 감지한 후에만 영상을 송출하여
-어르신의 사생활을 보호한다. 백엔드 경험이 없으므로 **Firebase로 통합 처리**한다.
-
-### 전체 흐름
-
-```
-[평상시] 슬라이드쇼 실행 중 (화면 항상 켜짐)
-    ↓
-[1. FCM 수신] 가족 앱에서 통화 요청 → FCM 푸시 도착
-    ↓
-[2. 벨소리] 화면 깨우기 + 벨소리 재생
-    ↓
-[3. 검증 (Buffer Zone)] 전면 카메라 ON (영상 송출 X)
-    → On-device AI로 얼굴 감지 (15초 타임아웃)
-    ↓
-[4-A. 얼굴 감지 O] → 3초 대기 → 양방향 영상 통화 시작
-[4-B. 얼굴 감지 X] → "지금은 연결할 수 없습니다" TTS 안내 → 종료 or 음성모드
-```
-
-### 기술 스택
-
-| 기능 | 패키지 | 역할 |
-|------|--------|------|
-| FCM 푸시 | `firebase_core` + `firebase_messaging` | 통화 요청 수신 |
-| 시그널링 | Firebase Realtime DB | WebRTC 연결 중개 (별도 서버 불필요) |
-| 얼굴 감지 | `google_mlkit_face_detection` | On-device AI, 프라이버시 보장 |
-| 카메라 | `camera` | 전면 카메라 프리뷰 + 프레임 스트리밍 |
-| 영상 통화 | `flutter_webrtc` | P2P 양방향 영상/음성 |
-| 벨소리 | `just_audio` | 알림음 재생 |
-| 안내 음성 | `flutter_tts` | "연결할 수 없습니다" 등 TTS |
-| 권한 관리 | `permission_handler` | 카메라/마이크 런타임 권한 |
-
-### 프로젝트 구조 (분리형)
-
-```
-E:\App\
-├── Senior/              # Smart Frame 앱 (수신측 - 현재 프로젝트)
-│   └── web-test-caller\ # 웹 테스트 페이지 (발신 + 사진 업로드)
-└── Caller/              # 가족 앱 (발신측 - Phase 4에서 생성)
-```
-
-### 구현 Phase
-
-#### Phase 1: Firebase 기본 설정 + FCM 수신
-- `pubspec.yaml` — firebase_core, firebase_messaging, just_audio, permission_handler 추가
-- `android/app/build.gradle` — Google Services 플러그인 적용
-- `android/app/google-services.json` — Firebase 콘솔에서 다운로드
-- `AndroidManifest.xml` — INTERNET, CAMERA, RECORD_AUDIO 권한 추가
-- `lib/services/fcm_service.dart` (신규) — FCM 토큰 관리 + 메시지 수신 핸들러
-- 검증: Firebase 콘솔에서 테스트 푸시 → 벨소리 재생 확인
-
-#### Phase 2: 카메라 + 얼굴 감지 (Buffer Zone)
-- `lib/services/face_detection_service.dart` (신규) — 카메라 프레임 → ML Kit 얼굴 감지
-- `lib/screens/incoming_call_screen.dart` (신규) — 수신 UI (카메라 프리뷰 + 벨소리 + 타이머)
-- 15초 타임아웃 → TTS "연결할 수 없습니다" 안내
-
-#### Phase 3: WebRTC 영상 통화 + 웹 테스트 페이지
-- `lib/services/webrtc_service.dart` (신규) — WebRTC 피어 연결
-- `lib/services/signaling_service.dart` (신규) — Firebase Realtime DB 시그널링
-- `lib/screens/video_call_screen.dart` (신규) — 양방향 영상 통화 UI
-- `E:\App\Senior\web-test-caller\index.html` — 브라우저 발신 테스트 페이지
-
-#### Phase 4: 가족 앱 (발신측 - 최종)
-- `E:\App\Caller\` — 별도 Flutter 프로젝트
-- 전화 걸기 버튼 + FCM 발송 + WebRTC 발신
-
-#### Phase 5: 통합 테스트 + 폴리싱
-- E2E 전체 흐름 테스트
-- 에러 핸들링, 음성모드 폴백
-
-### 최종 파일 구조
-
-```
+### 현재 lib/ 구조
+```text
 lib/
-├── main.dart                          # 앱 진입점, Firebase 초기화
+├── main.dart                    # AppConfig + SeniorCareFamily
 ├── screens/
-│   ├── slideshow_screen.dart          # 슬라이드쇼 (기존)
-│   ├── incoming_call_screen.dart      # 수신 UI (벨소리 + 카메라 + 얼굴감지)
-│   └── video_call_screen.dart         # 양방향 영상 통화
-├── widgets/
-│   └── photo_frame_view.dart          # 사진 표시 (기존)
-└── services/
-    ├── fcm_service.dart               # FCM 토큰/메시지 관리
-    ├── face_detection_service.dart     # 카메라 + ML Kit 얼굴 감지
-    ├── webrtc_service.dart            # WebRTC 피어 연결
-    └── signaling_service.dart         # Firebase Realtime DB 시그널링
-```
-
-### 추가 Android 권한
-
-```xml
-<uses-permission android:name="android.permission.INTERNET"/>
-<uses-permission android:name="android.permission.CAMERA"/>
-<uses-permission android:name="android.permission.RECORD_AUDIO"/>
-<uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
-```
-
-### 추가 의존성
-
-```yaml
-firebase_core: ^2.24.0
-firebase_messaging: ^14.7.0
-firebase_database: ^10.4.0
-google_mlkit_face_detection: ^0.11.0
-camera: ^0.10.5
-flutter_webrtc: ^0.9.28
-just_audio: ^0.9.36
-flutter_tts: ^0.67.0
-permission_handler: ^11.4.0
+│   ├── device_list_screen.dart  # 홈 (기기 목록)
+│   ├── outgoing_call_screen.dart
+│   └── video_call_screen.dart
+├── services/
+│   ├── signaling_service.dart
+│   ├── webrtc_service.dart
+│   └── fcm_service.dart
+└── widgets/
+    └── photo_frame_view.dart    # 시니어 잔재 → 제거 예정
 ```
 
 ---
 
-## Firebase 사진 관리 기능 (2026-03-05)
+## Phase 2: 코드 구조 정리 + 소셜 로그인
 
-### Context
+### 2-1. 코드 구조 정리
 
-현재 슬라이드쇼 사진은 **APK에 빌드 시 포함된 정적 에셋** (`assets/images/`).
-사진 변경하려면 코드에 파일 추가 → 빌드 → 재설치 필요.
-Firebase Storage + RTDB를 활용해 **원격으로 사진을 관리**하고 **실시간 동기화**하는 기능 추가.
+#### AppConfig 분리
+- `lib/config/app_config.dart` 생성 ← `main.dart`에서 AppConfig 이동
+- `main.dart`는 진입점만 (Firebase 초기화 + runApp)
+- `lib/app.dart` 생성 ← SeniorCareFamily 위젯 + 라우팅
 
-### 사용자 구분 (향후)
+#### 잔재 제거
+- `lib/widgets/photo_frame_view.dart` 삭제 (시니어 슬라이드쇼 전용)
 
-| 역할 | 기기 | 로그인 | 기능 |
-|------|------|--------|------|
-| **시니어** | 태블릿 (키오스크 모드) | 불필요 | 사진 표시 + 영상통화 수신 |
-| **자식** | 핸드폰 (여러명) | 필요 | 사진 업로드 + 영상통화 발신 |
-
-현재 단계: 테스트용 웹 페이지로 업로드
-
-### 아키텍처
-
-```
-[자식 핸드폰/웹]                    [Firebase]                    [시니어 태블릿]
-     │                                │                                │
-     │  사진 업로드                    │                                │
-     ├──→ Firebase Storage ──────────┤                                │
-     │    /photos/{deviceId}/        │                                │
-     │                                │                                │
-     │  메타데이터 저장               │   실시간 리스너                │
-     ├──→ RTDB /photos/{deviceId}/ ──┼──────────────────────────────→ │
-     │    {url, name, timestamp}     │                                │
-     │                                │    새 사진 감지 → 다운로드     │
-     │                                │    → 로컬 캐시 → 슬라이드쇼   │
-```
-
-### 동작 흐름
-
-```
-1. 자식이 사진 업로드
-   → Firebase Storage에 파일 저장
-   → RTDB /photos/{deviceId}/{photoId}에 메타데이터 저장
-
-2. 시니어 태블릿 (실시간 리스너)
-   → RTDB 변경 감지
-   → Storage에서 다운로드 → 로컬 캐시 저장
-   → 슬라이드쇼에 즉시 반영
-
-3. 사진 삭제 시
-   → RTDB에서 메타데이터 삭제
-   → 태블릿이 감지 → 로컬 캐시에서도 삭제
-   → 슬라이드쇼에서 즉시 제거
+#### 서비스 디렉토리 구조화
+```text
+services/
+├── auth_service.dart
+├── fcm_service.dart
+├── notification_service.dart
+├── photo_service.dart
+├── family/
+│   ├── family_service.dart
+│   ├── member_service.dart
+│   └── device_service.dart
+├── call/
+│   ├── signaling_service.dart
+│   ├── webrtc_service.dart
+│   └── call_history_service.dart
+└── reminder/
+    ├── reminder_service.dart
+    └── reminder_log_service.dart
 ```
 
-### RTDB 데이터 구조
+### 2-2. Firebase Auth + 소셜 로그인
 
-```
-Firebase RTDB
-├── /devices/{deviceId}/     ← 기존 (기기 등록/온라인 상태)
-├── /calls/{callId}/         ← 기존 (영상통화 시그널링)
-└── /photos/{deviceId}/      ← 신규 (사진 메타데이터)
-      └── {photoId}/
-            ├── url: "https://firebasestorage.googleapis.com/..."
-            ├── name: "family_photo.jpg"
-            ├── size: 2048000
-            ├── uploadedBy: "child_user_uid"
-            ├── uploadedAt: 1709654400000  (ServerValue.timestamp)
-            └── order: 1  (슬라이드쇼 순서, optional)
+#### pubspec.yaml 추가
+```yaml
+firebase_auth: ^5.x
+google_sign_in: ^6.x
+sign_in_with_apple: ^6.x
+kakao_flutter_sdk_user: ^1.x
+flutter_naver_login: ^1.x
 ```
 
-### 구현 단계
+#### 새 파일
+- `lib/services/auth_service.dart`
+  - `signInWithGoogle()`
+  - `signInWithApple()`
+  - `signInWithKakao()` → Firebase Custom Token
+  - `signInWithNaver()` → Firebase Custom Token
+  - `signOut()`
+  - `getCurrentUser()`
 
-#### Step 1: Firebase Storage 설정 + 패키지 추가
-- `pubspec.yaml`에 `firebase_storage`, `path_provider` 추가
-- Firebase Console에서 Storage 활성화 + 규칙 설정
+- `lib/screens/login_screen.dart`
+  - 4개 소셜 로그인 버튼 (Google, Apple, 카카오, 네이버)
 
-#### Step 2: PhotoService 신규 작성
+#### 카카오/네이버 추가 설정
+- Kakao Developers 앱 등록 + 네이티브 앱 키
+- Naver Developers 앱 등록 + Client ID/Secret
+- **Cloud Functions 필요**: 카카오/네이버 OAuth 토큰 → Firebase Custom Token 변환
 
-```dart
-// lib/services/photo_service.dart
-class PhotoService {
-  // RTDB /photos/{deviceId}/ 실시간 리스너
-  void listenForPhotos(String deviceId, Function(List<PhotoItem>) onUpdate);
-
-  // Firebase Storage에서 다운로드 → 로컬 캐시
-  Future<File> downloadAndCache(String url, String photoId);
-
-  // 로컬 캐시된 사진 목록 반환
-  Future<List<File>> getCachedPhotos();
-
-  // 캐시 정리 (삭제된 사진)
-  Future<void> cleanupCache(List<String> activePhotoIds);
-
-  void dispose();
-}
+#### 앱 진입 흐름 변경
+```text
+main.dart → Firebase.initializeApp()
+  → app.dart → AuthState 확인
+    ├─ 미로그인 → LoginScreen
+    ├─ 로그인 + 미페어링 → PairingScreen
+    └─ 로그인 + 페어링됨 → DeviceListScreen
 ```
 
-#### Step 3: SlideshowScreen 수정
-
-```
-앱 시작 → PhotoService.listenForPhotos()
-  ├── Firebase 사진 있음 → 다운로드/캐시 → 슬라이드쇼
-  └── Firebase 사진 없음 → 기존 assets/images/ 폴백
-```
-
-#### Step 4: PhotoFrameView 수정
-
-```dart
-// 로컬 캐시 파일이면 Image.file(), 에셋이면 Image.asset()
-child: isAsset
-  ? Image.asset(imagePath, fit: BoxFit.contain, ...)
-  : Image.file(File(imagePath), fit: BoxFit.contain, ...)
+#### RTDB 사용자 프로필
+```text
+/users/{userId}/
+  name: string
+  email: string
+  photoUrl: string
+  provider: "google" | "apple" | "kakao" | "naver"
+  familyIds/
+    {familyId}: true
 ```
 
-#### Step 5: 테스트 업로드 웹 페이지
+---
 
-```
-E:\App\Senior\web-test-caller\photo-upload.html
-  ├── 기기 선택 (RTDB /devices/ 에서 온라인 기기 목록)
-  ├── 사진 파일 선택 (multiple)
-  ├── Firebase Storage 업로드 → URL 획득
-  └── RTDB /photos/{deviceId}/ 에 메타데이터 저장
-```
+## Phase 3: 페어링 시스템
 
-### 수정 파일 요약
+### 3-1. Senior 앱 (Kotlin) — 페어링 코드/QR 생성
 
-| 파일 | 작업 | 설명 |
-|------|------|------|
-| `pubspec.yaml` | 수정 | firebase_storage, path_provider 추가 |
-| `lib/services/photo_service.dart` | 신규 | 사진 동기화 서비스 (RTDB 리스너 + Storage 다운로드 + 로컬 캐시) |
-| `lib/models/photo_item.dart` | 신규 | 사진 메타데이터 모델 클래스 |
-| `lib/screens/slideshow_screen.dart` | 수정 | PhotoService 연동, Firebase/에셋 분기 |
-| `lib/widgets/photo_frame_view.dart` | 수정 | Image.file() 지원 추가 |
-| `web-test-caller\photo-upload.html` | 신규 | 테스트용 웹 업로드 페이지 |
+#### 새 파일
+- `PairingActivity.kt` — QR + 6자리 코드 표시, 연결 대기
+- `res/layout/pairing_activity.xml` — 레이아웃
 
-### Firebase Storage 규칙
+#### 코드 생성 규칙
+- 6자리 영숫자 (0/O, 1/I/L 제외)
+- 문자셋: `ABCDEFGHJKLMNPQRSTUVWXYZ23456789`
 
-```
-// 테스트 단계 (인증 없이 누구나 읽기/쓰기)
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    match /photos/{deviceId}/{allPaths=**} {
-      allow read: if true;
-      allow write: if true;
-    }
-  }
-}
-
-// 프로덕션 (인증된 사용자만 쓰기)
-// allow write: if request.auth != null;
+#### 흐름
+```text
+Senior 앱 시작 → SharedPreferences에서 familyId 확인
+  ├─ 없음 → PairingActivity
+  │   1. familyId 생성 (RTDB push key)
+  │   2. 6자리 코드 생성
+  │   3. RTDB 저장:
+  │      /pairingCodes/{code} = familyId
+  │      /families/{familyId}/pairingCode = code
+  │      /families/{familyId}/devices/{deviceId} = { name, model }
+  │   4. QR + 코드 화면 표시
+  │   5. /families/{familyId}/members/ 감시 → 멤버 추가 시 페어링 완료
+  └─ 있음 → MainActivity (기존 흐름)
 ```
 
-### 비용 분석
+#### 패키지 추가
+```kotlin
+implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+```
 
-#### 4대 (현재 개발/테스트) — 무료 (Spark Plan)
+### 3-2. Family 앱 (Flutter) — 코드 입력/QR 스캔
 
-| 항목 | 무료 한도 | 예상 사용량 |
-|------|-----------|------------|
-| Storage 저장 | 5GB | ~300MB |
-| Storage 다운로드 | 1GB/일 | ~1.2GB (최초 1회) |
-| RTDB 동시연결 | 100개 | 4개 |
-| FCM | 무제한 | 수 회/주 |
+#### 새 파일
+- `lib/screens/pairing_screen.dart`
+  - 수동 코드 입력 텍스트필드
+  - QR 스캔 버튼 (카메라 → 코드 자동 입력)
+  - `/pairingCodes/{code}` 조회 → familyId 획득
+  - `/families/{familyId}/members/{userId}` 추가 (role: admin)
 
-#### 1000대 양산 (Blaze Plan) — ~$15/월 (~20,000원)
+- `lib/services/family/family_service.dart`
+  - `joinFamily(pairingCode)` — 페어링 코드로 가족 참여
+  - `createInviteCode(familyId)` — 가족 초대 코드 생성
+  - `joinByInvite(inviteCode)` — 초대 코드로 참여
+  - `getMyFamilies()` — 내 가족 그룹 목록
+  - `getFamilyDevices(familyId)` — 시니어 기기 목록
 
-가정: 가정당 100장(평균 3MB), 주 5장 신규, 영상통화 주 2~3회(5분)
+- `lib/services/family/member_service.dart`
+  - `getMembers(familyId)` — 멤버 목록
+  - `updateRole(familyId, userId, role)` — 역할 변경
+  - `removeMember(familyId, userId)` — 멤버 제거
 
-| 항목 | 계산 | 월 비용 |
-|------|------|---------|
-| Storage 저장 | 1000 × 300MB = 300GB | $7.80 |
-| Storage 다운로드 (신규) | 1000 × 60MB = 60GB/월 | $7.20 |
-| RTDB 저장 | ~20MB (메타데이터) | $0 |
-| RTDB 다운로드 | ~200MB (메타 + 시그널링) | $0 |
-| RTDB 동시연결 | 1000개 (Blaze 200K 무료) | $0 |
-| 영상통화 (WebRTC P2P) | Firebase 안 거침 | $0 |
-| FCM 푸시 | 10,000회/월 | $0 |
-| **월 합계** | | **~$15** |
+- `lib/services/family/device_service.dart`
+  - `getDeviceStatus(familyId, deviceId)` — 기기 상태 (배터리, 온라인)
+  - `renameDevice(familyId, deviceId, name)` — 이름 변경
+  - `removeDevice(familyId, deviceId)` — 기기 연결 해제
 
-최초 배포 시 1000대 일괄 다운로드: +$36 (1회성)
+#### pubspec.yaml 추가
+```yaml
+mobile_scanner: ^5.x    # QR 스캔
+```
 
-**대당 월 20원. 핵심은 로컬 캐시 관리** (캐시 깨지면 재다운로드 비용 발생).
+### 3-3. 가족 초대 (추가 멤버)
 
-#### 비용 리스크
+```text
+딸(최초) → 시니어 기기 페어링 코드 입력 → 가족 그룹 생성 (admin)
+    ↓
+딸 → "가족 초대" 버튼 → 초대 코드 생성 → 카톡/문자로 공유
+    ↓
+아들 → 앱 설치 → 로그인 → 초대 코드 입력 → 같은 가족 그룹 참여 (member)
+```
 
-| 시나리오 | 추가 비용 |
-|---------|----------|
-| 캐시 전부 깨짐 (1000대 × 300MB) | +$36/회 |
-| 사진 1000장으로 증가 | 저장 $26/월 |
-| 영상통화 빈도 증가 | 영향 없음 (P2P) |
+#### RTDB
+```text
+/inviteCodes/{code}: familyId
+/families/{familyId}/inviteCode: code
+```
 
-### Firebase vs Supabase 비교
+### 3-4. DeviceListScreen 수정
+- 전체 기기 목록 → 내 가족 그룹의 기기만 표시
+- `/families/{familyId}/devices/` 기반 조회
 
-| 항목 | Firebase | Supabase |
-|------|----------|----------|
-| 실시간 DB | RTDB (매우 빠름) | Realtime (Postgres 기반) |
-| onDisconnect | 네이티브 지원 (사용 중) | 없음 |
-| 오프라인 동기화 | RTDB 자동 캐시 | 없음 |
-| FCM 푸시 | 기본 내장 (사용 중) | 별도 서비스 필요 |
-| 시그널링 속도 | ms 단위 | 상대적 느림 |
-| 1000대 비용 | ~$15/월 | ~$25/월 (Pro 고정) |
+### 3-5. Senior DeviceRegistration 수정
+- 기기 등록 시 `familyId` 포함
+- `/families/{familyId}/devices/{deviceId}` 에도 등록
 
-**결론: Firebase 유지.** 시그널링/FCM/onDisconnect 모두 Firebase 기반 구현 완료.
-향후 자식 앱이 복잡해지면 자식 앱 백엔드만 Supabase 하이브리드 가능.
+---
 
-### 검증 방법
+## Phase 4: 사진 업로드
 
-1. `flutter build apk --release` 빌드 성공
-2. 웹 업로드 페이지에서 사진 업로드
-3. 태블릿 앱 시작 → 실시간으로 새 사진 슬라이드쇼 추가 확인
-4. Firebase Console에서 사진 삭제 → 슬라이드쇼에서 제거 확인
-5. Firebase 사진 전부 삭제 → 기존 에셋 이미지 폴백 확인
-6. 앱 재시작 → 캐시된 사진 즉시 표시 (재다운로드 없이)
+### pubspec.yaml 추가
+```yaml
+firebase_storage: ^12.x
+image_picker: ^1.x
+```
+
+### 새 파일
+- `lib/screens/photo_upload_screen.dart`
+  - 갤러리에서 선택 (다중 선택)
+  - 카메라 촬영
+  - 업로드 진행률 표시
+  - 업로드 완료 피드백
+
+- `lib/services/photo_service.dart`
+  - `uploadPhoto(familyId, imageFile)` → Storage 업로드 + RTDB 메타데이터
+  - `deletePhoto(familyId, photoId)` → Storage + RTDB 삭제
+  - `getPhotos(familyId)` → 사진 목록 스트림
+
+### Storage 경로
+```text
+/families/{familyId}/photos/{photoId}.jpg
+/families/{familyId}/thumbnails/{photoId}_thumb.jpg
+```
+
+### RTDB 메타데이터
+```text
+/families/{familyId}/photos/{photoId}/
+  url: "https://..."
+  thumbnailUrl: "https://..."
+  uploadedBy: userId
+  uploadedByName: "딸"
+  timestamp: ServerValue.TIMESTAMP
+```
+
+### Senior 앱 연동
+- `SlideshowManager.kt` 수정: assets → Firebase Storage에서 사진 로드
+- `/families/{familyId}/photos/` 실시간 감시
+- 사진 없을 때: 대기 화면 ("가족이 사진을 보내면 여기에 표시됩니다")
+
+---
+
+## Phase 5: 복약 알림 (리마인더)
+
+### Family 앱 (설정 측)
+
+#### 새 파일
+- `lib/screens/reminder/reminder_list_screen.dart` — 알림 목록
+- `lib/screens/reminder/reminder_edit_screen.dart` — 생성/수정
+  - 타입: 복약 / 커스텀
+  - 시간 설정 (TimePicker)
+  - 반복: 매일 / 평일 / 커스텀 요일
+  - 영상/음성 첨부 (녹화 or 갤러리)
+  - 활성/비활성 토글
+- `lib/screens/reminder/reminder_log_screen.dart` — 확인/미확인 이력
+
+- `lib/services/reminder/reminder_service.dart`
+  - `createReminder(familyId, reminder)`
+  - `updateReminder(familyId, reminderId, data)`
+  - `deleteReminder(familyId, reminderId)`
+  - `getReminders(familyId)` → 스트림
+  - `toggleReminder(familyId, reminderId, enabled)`
+
+- `lib/services/reminder/reminder_log_service.dart`
+  - `getLogs(familyId, reminderId)` → 이력 조회
+  - `getRecentMissed(familyId)` → 최근 미확인 목록
+
+### Senior 앱 (실행 측)
+- 설정된 시간에 영상 재생 ("할머니 약 드세요")
+- 영상 재생 후 얼굴 감지로 사람 유무 확인
+- 감지됨 → `reminderLogs`에 "confirmed"
+- 미감지 → `reminderLogs`에 "missed" → FCM으로 Family에 알림
+
+### RTDB
+```text
+/families/{familyId}/reminders/{reminderId}/
+  type: "medication" | "custom"
+  title: "혈압약"
+  message: "할머니 약 드세요"
+  mediaUrl: "gs://..."
+  schedule:
+    time: "08:00"
+    repeat: "daily" | "weekdays" | "custom"
+    days: [1,3,5]
+  enabled: true
+  createdBy: userId
+  createdByName: "딸"
+
+/families/{familyId}/reminderLogs/{logId}/
+  reminderId: "..."
+  scheduledAt: timestamp
+  status: "confirmed" | "missed" | "pending"
+  detectedAt: timestamp | null
+  notifiedAt: timestamp | null
+```
+
+### Storage
+```text
+/families/{familyId}/reminders/{reminderId}/media.mp4
+```
+
+---
+
+## Phase 6: 통화 기록 + 알림
+
+### 통화 기록
+- `lib/services/call/call_history_service.dart`
+  - 통화 시작/종료 시 자동 기록
+  - 발신자, 수신 기기, 시간, 통화 시간, 상태
+
+### 알림 서비스
+- `lib/services/notification_service.dart`
+  - 시니어 기기 오프라인 알림
+  - 복약 미확인 알림
+  - 새 가족 멤버 참여 알림
+  - 부재중 통화 알림
+
+---
+
+## Phase 7: 홈화면 개편 + 설정
+
+### DeviceListScreen 개편
+- 내 가족 그룹의 시니어 기기 목록
+- 각 기기: 이름, 모델, 온라인/오프라인 상태
+- 탭 → 영상통화 발신
+- 하단 네비게이션 or FAB:
+  - 사진 업로드
+  - 복약 알림
+  - 설정
+
+### 설정 화면
+- 내 프로필 (이름, 사진)
+- 가족 그룹 관리 (멤버 목록, 초대, 기기 관리)
+- 알림 설정 (on/off)
+- 로그아웃
+
+---
+
+## 구현 순서 (추천)
+
+| 순서 | 내용 | 앱 |
+|------|------|-----|
+| 1 | ~~Phase 1: 시니어 코드 제거~~ | Family — **완료** |
+| 2 | Phase 2-1: 코드 구조 정리 | Family |
+| 3 | Phase 3-1: 페어링 코드/QR 생성 | Senior |
+| 4 | Phase 2-2: 소셜 로그인 | Family |
+| 5 | Phase 3-2: 코드 입력/QR 스캔 + 페어링 | Family |
+| 6 | Phase 4: 사진 업로드 | Family |
+| 7 | Phase 4 연동: Storage에서 사진 로드 | Senior |
+| 8 | Phase 5: 복약 알림 설정 | Family |
+| 9 | Phase 5 연동: 복약 알림 재생 + 감지 | Senior |
+| 10 | Phase 3-3: 가족 초대 | Family |
+| 11 | Phase 6: 통화 기록 + 알림 | Family |
+| 12 | Phase 7: 홈화면 + 설정 | Family |
+
+---
+
+## 수정 대상 파일 요약
+
+### Family 앱 (E:\App\Family\)
+
+| 작업 | 파일 | Phase |
+|------|------|-------|
+| ~~삭제~~ | ~~face_detection_service.dart~~ | ~~1~~ 완료 |
+| ~~삭제~~ | ~~slideshow_screen.dart~~ | ~~1~~ 완료 |
+| ~~삭제~~ | ~~incoming_call_screen.dart~~ | ~~1~~ 완료 |
+| ~~삭제~~ | ~~BootReceiver.kt~~ | ~~1~~ 완료 |
+| 삭제 | `widgets/photo_frame_view.dart` | 2-1 |
+| 수정 | `main.dart` → 진입점만 | 2-1 |
+| 생성 | `app.dart` | 2-1 |
+| 생성 | `config/app_config.dart` | 2-1 |
+| 생성 | `services/auth_service.dart` | 2-2 |
+| 생성 | `screens/login_screen.dart` | 2-2 |
+| 생성 | `services/family/family_service.dart` | 3 |
+| 생성 | `services/family/member_service.dart` | 3 |
+| 생성 | `services/family/device_service.dart` | 3 |
+| 생성 | `screens/pairing_screen.dart` | 3 |
+| 수정 | `screens/device_list_screen.dart` | 3, 7 |
+| 생성 | `services/photo_service.dart` | 4 |
+| 생성 | `screens/photo_upload_screen.dart` | 4 |
+| 생성 | `services/reminder/reminder_service.dart` | 5 |
+| 생성 | `services/reminder/reminder_log_service.dart` | 5 |
+| 생성 | `screens/reminder/reminder_list_screen.dart` | 5 |
+| 생성 | `screens/reminder/reminder_edit_screen.dart` | 5 |
+| 생성 | `screens/reminder/reminder_log_screen.dart` | 5 |
+| 생성 | `services/call/call_history_service.dart` | 6 |
+| 생성 | `services/notification_service.dart` | 6 |
+
+### Senior 앱 (E:\App\Senior\)
+
+| 작업 | 파일 | Phase |
+|------|------|-------|
+| 생성 | `PairingActivity.kt` | 3 |
+| 생성 | `res/layout/pairing_activity.xml` | 3 |
+| 수정 | `MainActivity.kt` | 3 |
+| 수정 | `DeviceRegistration.kt` | 3 |
+| 수정 | `build.gradle.kts` (ZXing 추가) | 3 |
+| 수정 | `AndroidManifest.xml` | 3 |
+| 수정 | `SlideshowManager.kt` | 4 |
+| 수정 | `build.gradle.kts` (Coil 추가) | 4 |
+| 생성 | `ReminderManager.kt` | 5 |
+| 수정 | `CallListener.kt` (선택) | 3 |

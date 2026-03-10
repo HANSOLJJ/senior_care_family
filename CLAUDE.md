@@ -1,79 +1,111 @@
-# Smart Frame Family - Project Context
+# Senior Care Family App - Project Context
 
 ## Overview
-Smart Frame 시스템의 **자식(가족)용 앱** (Flutter).
-시니어 태블릿에 영상통화 발신 + 사진 업로드 + 기기 관리.
-iOS + Android 크로스 플랫폼 지원 목표.
 
-## 프로젝트 구조 (Smart Frame 전체)
-```
+Senior Care 시스템의 **가족(자식)용 앱** (Flutter).
+시니어 태블릿에 영상통화 발신 + 사진 업로드 + 복약 알림 설정 + 기기 관리.
+iOS + Android 크로스 플랫폼.
+
+## 전체 시스템 구조
+
+```text
 E:\App\
 ├── Family\     ← 이 프로젝트 (자식용, Flutter)
-├── Senior\     ← 시니어 태블릿용 (Android Native 전환 예정)
+└── Senior\     ← 시니어 태블릿용 (Android Native)
 ```
-- **Family 앱**: 영상통화 발신, 사진 업로드, 기기 관리 (UI 중심)
-- **Senior 앱**: 영상통화 수신, 얼굴감지 자동응답, 슬라이드쇼 (HW 제어 중심)
-- **백엔드**: Firebase 공유 (RTDB 시그널링, FCM, Storage)
+
+- **Family 앱**: 로그인, 페어링, 영상통화 발신, 사진 업로드, 복약 알림 설정, 기기 관리
+- **Senior 앱**: 영상통화 수신, 얼굴감지 자동응답, 슬라이드쇼, 복약 알림 재생
+- **백엔드**: Firebase 공유 (RTDB, FCM, Storage, Auth)
 
 ## 현재 상태
-Senior 앱에서 복사됨 (2026-03-05). 아직 자식앱 전용 기능(사진 업로드 등) 미구현.
-기존 코드는 시니어 태블릿용으로 동작하며, 자식앱으로 리브랜딩 + 기능 전환 필요.
+
+- Phase 1 완료: 시니어 전용 코드 제거 (얼굴감지, 슬라이드쇼, 수신화면, 부팅자동실행)
+- 리브랜딩 완료: `com.seniorcare.family`, 앱명 `Senior Care Family`
+- 다음: Phase 2 (코드 구조 정리 + 소셜 로그인)
 
 ## Architecture
-- **시그널링**: Firebase Realtime Database (`/calls/{callId}/`)
-- **영상통화**: WebRTC (flutter_webrtc)
-- **알림**: Firebase Cloud Messaging (FCM)
-- **기기 등록**: RTDB `/devices/{deviceId}/` (online 상태 + onDisconnect 자동 offline)
-- **발신 테스트**: `web-test-caller\index.html`
 
-## Key Files
-```
+- **인증**: Firebase Auth (Google/Apple/카카오/네이버)
+- **시그널링**: Firebase RTDB (`/calls/{callId}/`)
+- **영상통화**: WebRTC (flutter_webrtc, 로컬 패치 플러그인)
+- **푸시 알림**: FCM
+- **파일 저장**: Firebase Storage (사진/영상)
+- **가족 그룹**: RTDB `/families/{familyId}/` (페어링 + 초대)
+- **복약 알림**: RTDB `/families/{familyId}/reminders/`
+
+## Key Files (현재)
+
+```text
 lib/
-├── main.dart                      # AppConfig (deviceId, 기기등록), 앱 진입점
+├── main.dart                      # AppConfig + SeniorCareFamily 앱 위젯
 ├── screens/
-│   ├── slideshow_screen.dart      # 슬라이드쇼 (시니어용 → 제거/변경 예정)
-│   ├── incoming_call_screen.dart  # 수신 화면 (시니어용 → 제거/변경 예정)
-│   ├── video_call_screen.dart     # 영상통화 화면
-│   ├── device_list_screen.dart    # 기기 선택 화면 (발신용)
-│   └── outgoing_call_screen.dart  # 발신 대기 + 영상통화 화면
+│   ├── device_list_screen.dart    # 홈 — 시니어 기기 목록
+│   ├── outgoing_call_screen.dart  # 발신 대기 + 영상통화
+│   └── video_call_screen.dart     # 영상통화 화면
 ├── services/
-│   ├── signaling_service.dart     # RTDB 시그널링 (targetDeviceId 필터링)
-│   ├── webrtc_service.dart        # WebRTC (answerCall + makeCall + 끊김감지)
-│   ├── fcm_service.dart           # FCM 토큰 관리 + RTDB 저장
-│   └── face_detection_service.dart # 얼굴감지 (시니어용 → 제거 예정)
+│   ├── signaling_service.dart     # RTDB 시그널링
+│   ├── webrtc_service.dart        # WebRTC (makeCall + 끊김감지)
+│   └── fcm_service.dart           # FCM 토큰 관리
 └── widgets/
-    └── photo_frame_view.dart      # 사진 표시 위젯
+    └── photo_frame_view.dart      # 시니어 잔재 → 제거 예정
+```
+
+## 목표 디렉토리 구조 (Phase 2~7 완료 후)
+
+```text
+lib/
+├── main.dart                              # 진입점만
+├── app.dart                               # SeniorCareFamily 위젯 + 라우팅
+├── config/
+│   └── app_config.dart                    # 기기 정보, Firebase 등록
+├── screens/
+│   ├── login_screen.dart                  # 소셜 로그인
+│   ├── pairing_screen.dart                # 페어링 코드 / QR 스캔
+│   ├── device_list_screen.dart            # 홈 (기기 목록)
+│   ├── outgoing_call_screen.dart          # 발신 + 영상통화
+│   ├── video_call_screen.dart             # 영상통화
+│   ├── photo_upload_screen.dart           # 사진 업로드
+│   └── reminder/                          # 복약 알림
+│       ├── reminder_list_screen.dart
+│       ├── reminder_edit_screen.dart
+│       └── reminder_log_screen.dart
+├── services/
+│   ├── auth_service.dart                  # 로그인/로그아웃
+│   ├── fcm_service.dart                   # FCM 토큰
+│   ├── notification_service.dart          # 푸시 알림 수신/처리
+│   ├── photo_service.dart                 # 사진 업로드/삭제
+│   ├── family/
+│   │   ├── family_service.dart            # 그룹 생성, 페어링, 초대
+│   │   ├── member_service.dart            # 멤버 관리
+│   │   └── device_service.dart            # 기기 상태/관리
+│   ├── call/
+│   │   ├── signaling_service.dart         # RTDB 시그널링
+│   │   ├── webrtc_service.dart            # WebRTC
+│   │   └── call_history_service.dart      # 통화 기록
+│   └── reminder/
+│       ├── reminder_service.dart          # 스케줄 CRUD
+│       └── reminder_log_service.dart      # 확인/미확인 조회
+└── widgets/
 ```
 
 ## Build & Deploy
-```bash
-# 빌드
-flutter build apk --release
 
-# 설치 (패키지명: 변경 예정, 현재 com.example.senior_win)
+```bash
+flutter build apk --release
 adb -s <serial> install -r build/app/outputs/flutter-apk/app-release.apk
 ```
 
-## 향후 계획
-1. **리브랜딩**: 패키지명, 앱 이름 변경 (senior_win → smart_frame_family)
-2. **자식앱 기능 추가**: 사진 업로드 (Firebase Storage), 기기 관리
-3. **시니어 전용 기능 제거**: 얼굴감지, 슬라이드쇼 등
-4. **Senior 앱**: 별도 Android Native (Kotlin) 프로젝트로 새로 개발
+## 주요 문서
 
-## Call Flow (발신측)
-```
-[Family 앱] 기기 목록 조회 → 대상 선택 → offer 생성
-    ↓
-/calls/{callId} (targetDeviceId 포함) → RTDB 저장
-    ↓
-[Senior 태블릿] 수신 → answer 전송
-    ↓
-ICE candidate 교환 → WebRTC P2P 연결
-    ↓
-양방향 영상통화
-```
+- `docs/project-structure.md` — 프로젝트 구조 + RTDB 스키마 + 화면 흐름
+- `docs/smart-frame-plan.md` — 전체 구현 계획 (Phase 1~7)
+- `E:\App\Senior\docs\family-integration-plan.md` — Senior 앱 연동 수정 가이드
 
 ## 기술 결정 이력
-- Flutter 유지 이유: 크로스 플랫폼(iOS+Android), UI 중심 기능, 이미 동작하는 코드 재활용
-- Senior 앱 Native 전환 이유: flutter_webrtc 한계, HW 직접 제어 필요
-- Firebase 선택 이유: onDisconnect, 실시간 동기화, FCM 통합 (Supabase 대비 유리)
+
+- Flutter 유지: 크로스 플랫폼(iOS+Android), UI 중심, 기존 코드 재활용
+- Senior 앱 Native: flutter_webrtc 한계, HW 직접 제어
+- Firebase 선택: onDisconnect, 실시간 동기화, FCM 통합
+- 소셜 로그인 4종: Google + Apple + 카카오 + 네이버 (한국 시장)
+- 카카오/네이버: Firebase Custom Token via Cloud Functions

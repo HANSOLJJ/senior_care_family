@@ -3,8 +3,8 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  firebase_auth
   firebase_core
-  flutter_tts
   flutter_webrtc
   permission_handler_windows
 )

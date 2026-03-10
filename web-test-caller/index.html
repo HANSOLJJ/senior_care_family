@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Smart Frame - 테스트 발신</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #1a1a2e; color: #fff; min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+    }
+    h1 { margin: 20px 0 10px; font-size: 24px; }
+    .status { color: #8888ff; margin-bottom: 20px; font-size: 14px; }
+
+    .device-select {
+      margin: 10px 0; display: flex; gap: 12px; align-items: center;
+    }
+    .device-select label { font-size: 14px; }
+    .device-select select {
+      padding: 8px 16px; border-radius: 8px; border: 1px solid #555;
+      background: #2d2d44; color: #fff; font-size: 14px; min-width: 200px;
+    }
+
+    .video-container {
+      display: flex; gap: 16px; flex-wrap: wrap; justify-content: center;
+      margin: 10px 0;
+    }
+    .video-box { position: relative; }
+    .video-box video {
+      width: 400px; height: 300px; background: #000;
+      border-radius: 12px; border: 2px solid #333;
+      object-fit: cover;
+    }
+    .video-label {
+      position: absolute; bottom: 10px; left: 10px;
+      background: rgba(0,0,0,0.7); padding: 4px 10px;
+      border-radius: 6px; font-size: 12px;
+    }
+
+    .controls { margin: 20px 0; display: flex; gap: 12px; }
+    button {
+      padding: 12px 32px; border: none; border-radius: 8px;
+      font-size: 16px; cursor: pointer; font-weight: bold;
+    }
+    #callBtn { background: #4CAF50; color: #fff; }
+    #callBtn:hover { background: #45a049; }
+    #callBtn:disabled { background: #555; cursor: not-allowed; }
+    #hangupBtn { background: #f44336; color: #fff; }
+    #hangupBtn:hover { background: #da190b; }
+    #hangupBtn:disabled { background: #555; cursor: not-allowed; }
+
+    .log {
+      width: 90%; max-width: 820px; background: #0d1117;
+      border-radius: 8px; padding: 12px; margin: 10px 0;
+      font-family: monospace; font-size: 12px;
+      max-height: 200px; overflow-y: auto;
+    }
+    .log-entry { padding: 2px 0; border-bottom: 1px solid #1a1a2e; }
+  </style>
+</head>
+<body>
+  <h1>Smart Frame 테스트 발신</h1>
+  <div class="status" id="status">Firebase 연결 중...</div>
+
+  <!-- 기기 선택 드롭다운 -->
+  <div class="device-select">
+    <label>대상 기기:</label>
+    <select id="deviceSelect">
+      <option value="">기기 목록 로딩 중...</option>
+    </select>
+  </div>
+
+  <div class="video-container">
+    <div class="video-box">
+      <video id="localVideo" autoplay muted playsinline></video>
+      <div class="video-label">내 카메라</div>
+    </div>
+    <div class="video-box">
+      <video id="remoteVideo" autoplay playsinline></video>
+      <div class="video-label" id="remoteLabel">Smart Frame</div>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="callBtn" onclick="startCall()" disabled>전화 걸기</button>
+    <button id="hangupBtn" onclick="hangUp()" disabled>통화 종료</button>
+  </div>
+
+  <div class="log" id="log"></div>
+
+  <!-- Firebase SDK (CDN) -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.0/firebase-app.js";
+    import { getDatabase, ref, push, set, onValue, onChildAdded, remove, serverTimestamp, onDisconnect }
+      from "https://www.gstatic.com/firebasejs/11.6.0/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDOsFt5t45jpcJWVwaMxy6gjP7kCR01ERU",
+      authDomain: "dcom-smart-frame.firebaseapp.com",
+      databaseURL: "https://dcom-smart-frame-default-rtdb.firebaseio.com",
+      projectId: "dcom-smart-frame",
+      storageBucket: "dcom-smart-frame.firebasestorage.app",
+      messagingSenderId: "632083959171",
+      appId: "1:632083959171:web:138189f8fa7ef7bb8e7ab6",
+      measurementId: "G-CJR1GH84KB"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    let localStream = null;
+    let peerConnection = null;
+    let callId = null;
+
+    const iceServers = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'turn:a.relay.metered.ca:80', username: 'e8dd65e92f6e86cfe1ef0635', credential: 'dktMDqpJIcMw4VYz' },
+        { urls: 'turn:a.relay.metered.ca:443', username: 'e8dd65e92f6e86cfe1ef0635', credential: 'dktMDqpJIcMw4VYz' },
+        { urls: 'turn:a.relay.metered.ca:443?transport=tcp', username: 'e8dd65e92f6e86cfe1ef0635', credential: 'dktMDqpJIcMw4VYz' },
+      ]
+    };
+
+    // DOM
+    const localVideo = document.getElementById('localVideo');
+    const remoteVideo = document.getElementById('remoteVideo');
+    const remoteLabel = document.getElementById('remoteLabel');
+    const callBtn = document.getElementById('callBtn');
+    const hangupBtn = document.getElementById('hangupBtn');
+    const statusEl = document.getElementById('status');
+    const deviceSelect = document.getElementById('deviceSelect');
+
+    function log(msg) {
+      console.log(msg);
+      const el = document.getElementById('log');
+      const time = new Date().toLocaleTimeString();
+      el.innerHTML += `<div class="log-entry">[${time}] ${msg}</div>`;
+      el.scrollTop = el.scrollHeight;
+    }
+
+    function setStatus(msg) {
+      statusEl.textContent = msg;
+      log(msg);
+    }
+
+    // ====== 기기 목록 실시간 로드 ======
+    function loadDeviceList() {
+      const devicesRef = ref(db, 'devices');
+      onValue(devicesRef, (snapshot) => {
+        const data = snapshot.val();
+        deviceSelect.innerHTML = '';
+
+        if (!data) {
+          deviceSelect.innerHTML = '<option value="">등록된 기기 없음</option>';
+          callBtn.disabled = true;
+          return;
+        }
+
+        let hasOnline = false;
+        const entries = Object.entries(data);
+        // 온라인 먼저 정렬
+        entries.sort((a, b) => {
+          const aOn = a[1].online ? 0 : 1;
+          const bOn = b[1].online ? 0 : 1;
+          return aOn - bOn;
+        });
+
+        for (const [id, info] of entries) {
+          const name = info.name || info.model || id;
+          const model = info.model || '';
+          const online = info.online === true;
+          const shortId = id.length > 8 ? id.substring(0, 8) : id;
+          const opt = document.createElement('option');
+          opt.value = id;
+          opt.textContent = `${name} (${shortId}) ${online ? '● 온라인' : '○ 오프라인'}`;
+          opt.disabled = !online;
+          deviceSelect.appendChild(opt);
+          if (online) hasOnline = true;
+        }
+
+        callBtn.disabled = !hasOnline;
+        log(`기기 목록 갱신: ${entries.length}개 (온라인: ${entries.filter(e => e[1].online).length})`);
+      });
+    }
+
+    // 브라우저 닫기/새로고침 시 통화 정리
+    window.addEventListener('beforeunload', () => {
+      if (callId) {
+        // sendBeacon은 안 되므로 동기적으로 최대한 정리
+        try { hangUp(); } catch(e) {}
+      }
+    });
+
+    // Firebase 연결 확인 + 기기 목록 로드
+    try {
+      setStatus('Firebase 연결 완료');
+      loadDeviceList();
+    } catch (e) {
+      setStatus('Firebase 연결 실패: ' + e.message);
+    }
+
+    // 전화 걸기
+    window.startCall = async function() {
+      // 선택한 기기 확인
+      const targetDeviceId = deviceSelect.value;
+      if (!targetDeviceId) {
+        setStatus('대상 기기를 선택하세요');
+        return;
+      }
+      const targetName = deviceSelect.options[deviceSelect.selectedIndex].textContent;
+      remoteLabel.textContent = targetName.split(' (')[0];
+
+      try {
+        callBtn.disabled = true;
+        setStatus('카메라 시작 중...');
+
+        // 1. 로컬 미디어 스트림 (카메라 없으면 오디오만)
+        try {
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: { width: 640, height: 480 },
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          });
+          log('로컬 카메라+마이크 ON');
+        } catch (camErr) {
+          log('카메라 없음, 오디오만 사용: ' + camErr.message);
+          localStream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          });
+          log('로컬 마이크만 ON');
+        }
+        localVideo.srcObject = localStream;
+
+        // 2. PeerConnection 생성
+        peerConnection = new RTCPeerConnection(iceServers);
+
+        // 로컬 트랙 추가
+        localStream.getTracks().forEach(track => {
+          peerConnection.addTrack(track, localStream);
+        });
+
+        // 카메라 없어도 상대방 비디오를 수신하기 위해 recvonly transceiver 추가
+        const hasVideoTrack = localStream.getVideoTracks().length > 0;
+        if (!hasVideoTrack) {
+          peerConnection.addTransceiver('video', { direction: 'recvonly' });
+          log('비디오 recvonly transceiver 추가 (카메라 없음)');
+        }
+
+        // 원격 스트림 수신
+        peerConnection.ontrack = (event) => {
+          log('원격 트랙 수신: ' + event.track.kind);
+          if (event.streams[0]) {
+            remoteVideo.srcObject = event.streams[0];
+          }
+        };
+
+        // ICE candidate → DB에 저장
+        peerConnection.onicecandidate = (event) => {
+          if (event.candidate && callId) {
+            const candidateRef = ref(db, `calls/${callId}/callerCandidates`);
+            push(candidateRef, {
+              candidate: event.candidate.candidate,
+              sdpMid: event.candidate.sdpMid,
+              sdpMLineIndex: event.candidate.sdpMLineIndex
+            });
+          }
+        };
+
+        peerConnection.onconnectionstatechange = () => {
+          log('연결 상태: ' + peerConnection.connectionState);
+          if (peerConnection.connectionState === 'connected') {
+            setStatus('통화 중');
+          } else if (peerConnection.connectionState === 'disconnected' ||
+                     peerConnection.connectionState === 'failed') {
+            setStatus('연결 끊김');
+            setTimeout(() => {
+              if (peerConnection && (peerConnection.connectionState === 'disconnected' ||
+                  peerConnection.connectionState === 'failed')) {
+                hangUp();
+              }
+            }, 5000);
+          }
+        };
+
+        // 3. SDP Offer 생성
+        const offer = await peerConnection.createOffer();
+        await peerConnection.setLocalDescription(offer);
+        log('SDP Offer 생성 완료');
+
+        // 4. Firebase에 통화 생성 (targetDeviceId 포함)
+        const callsRef = ref(db, 'calls');
+        const newCallRef = push(callsRef);
+        callId = newCallRef.key;
+
+        await set(newCallRef, {
+          offer: { sdp: offer.sdp, type: offer.type },
+          targetDeviceId: targetDeviceId,
+          status: 'ringing',
+          createdAt: serverTimestamp()
+        });
+
+        // onDisconnect 설정: 브라우저 종료 시 자동 정리
+        onDisconnect(ref(db, `calls/${callId}`)).remove();
+
+        setStatus(`전화 거는 중... (${remoteLabel.textContent} 대기)`);
+        hangupBtn.disabled = false;
+
+        // 5. Answer 감시
+        const answerRef = ref(db, `calls/${callId}/answer`);
+        onValue(answerRef, async (snapshot) => {
+          const data = snapshot.val();
+          if (!data || !peerConnection) return;
+          if (peerConnection.currentRemoteDescription) return;
+
+          log('SDP Answer 수신');
+          const answer = new RTCSessionDescription(data);
+          await peerConnection.setRemoteDescription(answer);
+          setStatus('연결 중...');
+        });
+
+        // 6. 수신자 ICE candidates 감시
+        const calleeCandidatesRef = ref(db, `calls/${callId}/calleeCandidates`);
+        onChildAdded(calleeCandidatesRef, (snapshot) => {
+          const data = snapshot.val();
+          if (!data || !peerConnection) return;
+          log('수신자 ICE candidate 수신');
+          peerConnection.addIceCandidate(new RTCIceCandidate(data));
+        });
+
+        // 7. 상대방 통화 종료 감시
+        const statusRef = ref(db, `calls/${callId}/status`);
+        onValue(statusRef, (snapshot) => {
+          const st = snapshot.val();
+          if (st === 'ended') {
+            log('상대방이 통화 종료');
+            hangUp();
+          }
+        });
+
+      } catch (e) {
+        setStatus('에러: ' + e.message);
+        callBtn.disabled = false;
+      }
+    };
+
+    // 통화 종료
+    window.hangUp = async function() {
+      // 로컬 트랙 정지
+      if (localStream) {
+        localStream.getTracks().forEach(track => track.stop());
+        localStream = null;
+      }
+      localVideo.srcObject = null;
+      remoteVideo.srcObject = null;
+
+      // PeerConnection 종료
+      if (peerConnection) {
+        peerConnection.close();
+        peerConnection = null;
+      }
+
+      // DB 정리: status='ended' 설정 → 2초 후 삭제 (상대방 감지 시간 확보)
+      if (callId) {
+        const cid = callId;
+        callId = null;
+        try {
+          await set(ref(db, `calls/${cid}/status`), 'ended');
+          setTimeout(async () => {
+            try { await remove(ref(db, `calls/${cid}`)); } catch(e) {}
+          }, 2000);
+        } catch (e) { console.log('cleanup error:', e); }
+      }
+
+      setStatus('통화 종료');
+      callBtn.disabled = false;
+      hangupBtn.disabled = true;
+      remoteLabel.textContent = 'Smart Frame';
+    };
+  </script>
+</body>
+</html>

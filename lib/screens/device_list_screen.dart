@@ -1,18 +1,20 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
-import '../main.dart';
+import '../config/app_config.dart';
+import '../services/auth_service.dart';
 import 'outgoing_call_screen.dart';
 
 /// 온라인 기기 목록 화면 — 터치해서 영상통화 발신
 class DeviceListScreen extends StatefulWidget {
-  const DeviceListScreen({super.key});
+  final String familyId;
+
+  const DeviceListScreen({super.key, required this.familyId});
 
   @override
   State<DeviceListScreen> createState() => _DeviceListScreenState();
 }
 
 class _DeviceListScreenState extends State<DeviceListScreen> {
-  final _devicesRef = FirebaseDatabase.instance.ref('devices');
   List<Map<String, dynamic>> _devices = [];
   bool _loading = true;
 
@@ -23,7 +25,9 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   }
 
   void _loadDevices() {
-    _devicesRef.onValue.listen((event) {
+    // 가족 그룹의 기기만 조회
+    final ref = FirebaseDatabase.instance.ref('families/${widget.familyId}/devices');
+    ref.onValue.listen((event) {
       final data = event.snapshot.value as Map?;
       if (data == null) {
         if (mounted) setState(() { _devices = []; _loading = false; });
@@ -54,7 +58,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   }
 
   void _callDevice(Map<String, dynamic> device) {
-    Navigator.of(context).pushReplacement(
+    Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => OutgoingCallScreen(
           targetDeviceId: device['id'] as String,
@@ -71,10 +75,14 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: const Text('기기 선택'),
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => Navigator.of(context).pop(),
-        ),
+        automaticallyImplyLeading: false,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout, color: Colors.white70),
+            onPressed: () => AuthService().signOut(),
+            tooltip: '로그아웃',
+          ),
+        ],
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator(color: Colors.white))

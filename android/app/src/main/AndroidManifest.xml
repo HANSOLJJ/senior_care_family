@@ -1,7 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
-    <uses-permission android:name="android.permission.INTERNET"/>
+<uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.CAMERA"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
@@ -13,7 +12,6 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTop"
-            android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -30,22 +28,31 @@
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <!-- 홈 런처로 등록: 홈 버튼 누르면 이 앱으로 돌아옴 -->
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN"/>
-                <category android:name="android.intent.category.HOME"/>
-                <category android:name="android.intent.category.DEFAULT"/>
+        </activity>
+        <!-- 카카오 로그인 리다이렉트 -->
+        <activity
+            android:name="com.kakao.sdk.flutter.AuthCodeCustomTabsActivity"
+            android:exported="true">
+            <intent-filter android:label="flutter_web_auth">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="kakaob086e6e5742edeccfa15f54aaea419a2"
+                      android:host="oauth" />
             </intent-filter>
         </activity>
-        <!-- 부팅 완료 시 앱 자동 실행 -->
-        <receiver
-            android:name=".BootReceiver"
-            android:exported="true"
-            android:enabled="true">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED"/>
-            </intent-filter>
-        </receiver>
+
+        <!-- 네이버 로그인 SDK -->
+        <meta-data
+            android:name="com.naver.sdk.clientId"
+            android:value="@string/client_id" />
+        <meta-data
+            android:name="com.naver.sdk.clientSecret"
+            android:value="@string/client_secret" />
+        <meta-data
+            android:name="com.naver.sdk.clientName"
+            android:value="@string/client_name" />
+
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->
         <meta-data

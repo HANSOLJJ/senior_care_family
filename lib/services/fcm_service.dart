@@ -1,7 +1,7 @@
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:just_audio/just_audio.dart';
-import '../main.dart';
+import '../config/app_config.dart';
 
 /// 백그라운드 FCM 메시지 핸들러 (top-level 함수여야 함)
 @pragma('vm:entry-point')

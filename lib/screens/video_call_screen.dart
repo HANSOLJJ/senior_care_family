@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import '../services/signaling_service.dart';
-import '../services/webrtc_service.dart';
+import '../services/call/signaling_service.dart';
+import '../services/call/webrtc_service.dart';
 
 /// 양방향 영상 통화 화면
 class VideoCallScreen extends StatefulWidget {
