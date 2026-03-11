@@ -136,3 +136,90 @@ exports.naverCustomToken = functions.https.onCall(async (data, context) => {
   const customToken = await admin.auth().createCustomToken(uid);
   return { customToken };
 });
+
+// ─── 사진 만료 처리 ───
+
+const EXPIRE_DAYS = 7;
+const CLEANUP_DAYS = 37; // 만료 후 30일
+
+/**
+ * 만료 사진 정리 로직 (스케줄 + 수동 공용)
+ *
+ * 1. 7일 경과 pending → Storage 삭제 + status: "expired"
+ * 2. 37일 경과 expired → RTDB 항목 완전 삭제
+ */
+async function doCleanup() {
+  const now = Date.now();
+  const expireCutoff = now - EXPIRE_DAYS * 24 * 60 * 60 * 1000;
+  const cleanupCutoff = now - CLEANUP_DAYS * 24 * 60 * 60 * 1000;
+  const bucket = admin.storage().bucket("dcom-smart-frame.firebasestorage.app");
+
+  const familiesSnap = await admin.database().ref("families").once("value");
+  const families = familiesSnap.val();
+  if (!families) return { expired: 0, cleaned: 0 };
+
+  let expired = 0;
+  let cleaned = 0;
+
+  for (const [familyId, familyData] of Object.entries(families)) {
+    const photoSync = familyData.photoSync;
+    if (!photoSync) continue;
+
+    for (const [photoId, photo] of Object.entries(photoSync)) {
+      const { status, createdAt, storagePath } = photo;
+
+      // 7일 만료: pending → expired
+      if (status === "pending" && createdAt < expireCutoff) {
+        if (storagePath) {
+          try {
+            await bucket.file(storagePath).delete();
+          } catch (e) {
+            if (e.code !== 404) {
+              console.error(`Storage 삭제 실패: ${storagePath}`, e.message);
+            }
+          }
+        }
+        await admin.database()
+          .ref(`families/${familyId}/photoSync/${photoId}`)
+          .update({ status: "expired", storagePath: null });
+        expired++;
+        console.log(`만료 처리: families/${familyId}/photoSync/${photoId}`);
+      }
+
+      // 37일 정리: expired → 완전 삭제
+      if (status === "expired" && createdAt < cleanupCutoff) {
+        await admin.database()
+          .ref(`families/${familyId}/photoSync/${photoId}`)
+          .remove();
+        cleaned++;
+        console.log(`RTDB 삭제: families/${familyId}/photoSync/${photoId}`);
+      }
+    }
+  }
+
+  return { expired, cleaned };
+}
+
+/**
+ * 스케줄 함수: 6시간마다 자동 실행
+ */
+exports.cleanupExpiredPhotos = functions.pubsub
+  .schedule("every 6 hours")
+  .onRun(async () => {
+    const result = await doCleanup();
+    console.log(`만료 처리 완료: ${result.expired}건 만료, ${result.cleaned}건 삭제`);
+    return null;
+  });
+
+/**
+ * HTTP 함수: 테스트용 수동 호출
+ */
+exports.cleanupExpiredPhotosManual = functions.https.onRequest(async (req, res) => {
+  const result = await doCleanup();
+  res.json({
+    success: true,
+    expired: result.expired,
+    cleaned: result.cleaned,
+    timestamp: new Date().toISOString(),
+  });
+});

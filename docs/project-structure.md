@@ -88,6 +88,19 @@ android/app/src/main/
 └── google-services.json                   # Firebase 설정
 ```
 
+### Cloud Functions (서버리스)
+
+```
+functions/
+├── index.js                              # Cloud Functions 진입점
+│   ├── kakaoCustomToken                  # 카카오 로그인 → Firebase Custom Token
+│   ├── naverCustomToken                  # 네이버 로그인 → Firebase Custom Token
+│   ├── naverCallback                     # 네이버 OAuth 리다이렉트
+│   └── cleanupExpiredPhotos              # 만료 사진 정리 (6시간마다 스케줄)
+├── package.json                          # 의존성 (firebase-admin, firebase-functions)
+└── dcom-smart-frame-firebase-adminsdk-*.json  # 서비스 계정 키 (gitignore)
+```
+
 ### 로컬 플러그인
 
 ```
@@ -109,85 +122,9 @@ plugins/
 
 ---
 
-## RTDB 데이터 구조
+## Firebase 데이터 스키마
 
-```
-Firebase RTDB
-│
-├── /devices/{deviceId}/                     # 기기 등록 (Senior + Family 공용)
-│   ├── online: boolean
-│   ├── model: string
-│   ├── familyId: string
-│   ├── fcmToken: string
-│   └── lastSeen: timestamp
-│
-├── /calls/{callId}/                         # 영상통화 시그널링
-│   ├── offer: { sdp, type }
-│   ├── answer: { sdp, type }
-│   ├── targetDeviceId: string
-│   ├── status: "waiting" | "answered" | "ended"
-│   ├── callerCandidates/
-│   └── calleeCandidates/
-│
-├── /pairingCodes/{code}: familyId           # 시니어 기기 페어링 코드 역조회
-│
-├── /inviteCodes/{code}: familyId            # 가족 멤버 초대 코드 역조회
-│
-├── /families/{familyId}/
-│   ├── pairingCode: string                  # 시니어 기기 페어링 코드
-│   ├── inviteCode: string                   # 가족 멤버 초대 코드
-│   ├── createdAt: timestamp
-│   ├── devices/
-│   │   └── {deviceId}: { name, model, addedAt }
-│   ├── members/
-│   │   └── {userId}: { name, role, joinedAt }   # role: "admin" | "member"
-│   ├── photos/
-│   │   └── {photoId}: { url, thumbnailUrl, uploadedBy, uploadedByName, timestamp }
-│   ├── reminders/
-│   │   └── {reminderId}/
-│   │       ├── type: "medication" | "custom"
-│   │       ├── title: string
-│   │       ├── message: string
-│   │       ├── mediaUrl: string             # 가족이 녹화한 영상/음성
-│   │       ├── schedule: { time, repeat, days }
-│   │       ├── enabled: boolean
-│   │       ├── createdBy: userId
-│   │       └── createdByName: string
-│   ├── reminderLogs/
-│   │   └── {logId}/
-│   │       ├── reminderId: string
-│   │       ├── scheduledAt: timestamp
-│   │       ├── status: "confirmed" | "missed" | "pending"
-│   │       ├── detectedAt: timestamp | null
-│   │       └── notifiedAt: timestamp | null
-│   └── callHistory/
-│       └── {callId}/
-│           ├── callerId: string
-│           ├── callerName: string
-│           ├── targetDeviceId: string
-│           ├── startedAt: timestamp
-│           ├── endedAt: timestamp
-│           ├── duration: number (seconds)
-│           └── status: "completed" | "missed" | "no_answer"
-│
-├── /users/{userId}/                         # Family 앱 사용자
-│   ├── name: string
-│   ├── email: string
-│   ├── photoUrl: string
-│   ├── provider: "google" | "apple" | "kakao" | "naver"
-│   └── familyIds/
-│       └── {familyId}: true
-│
-└── /fcmTokens/{deviceId}: string            # FCM 토큰
-```
-
-### Firebase Storage 경로
-
-```
-/families/{familyId}/photos/{photoId}.jpg
-/families/{familyId}/thumbnails/{photoId}_thumb.jpg
-/families/{familyId}/reminders/{reminderId}/media.mp4   # 복약 알림 영상
-```
+RTDB + Storage 스키마는 별도 문서 참조: [RTDB_schema.md](RTDB_schema.md)
 
 ---
 
