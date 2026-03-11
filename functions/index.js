@@ -71,20 +71,6 @@ exports.kakaoCustomToken = functions.https.onCall(async (data, context) => {
 });
 
 /**
- * 네이버 OAuth 콜백 → 네이버 SDK Custom Tab으로 리다이렉트
- * (SDK가 code를 받아서 자체적으로 토큰 교환 처리)
- */
-exports.naverCallback = functions.https.onRequest(async (req, res) => {
-  const qs = new URLSearchParams(req.query).toString();
-  const redirectUrl = `naver3rdpartylogin://authorize/?${qs}`;
-  res.send(`<!DOCTYPE html><html><head>
-    <meta http-equiv="refresh" content="0;url=${redirectUrl}">
-    </head><body>
-    <script>window.location.href="${redirectUrl}";</script>
-    </body></html>`);
-});
-
-/**
  * 네이버 로그인 → Firebase Custom Token (카카오와 동일 방식)
  */
 exports.naverCustomToken = functions.https.onCall(async (data, context) => {

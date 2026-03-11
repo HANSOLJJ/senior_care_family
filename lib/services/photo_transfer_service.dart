@@ -109,8 +109,6 @@ class PhotoTransferService {
 
   /// 보낸 사진 목록 실시간 스트림
   Stream<DatabaseEvent> watchPhotoSync(String familyId) {
-    return _db.ref('families/$familyId/photoSync')
-        .orderByChild('createdAt')
-        .onValue;
+    return _db.ref('families/$familyId/photoSync').onValue;
   }
 }

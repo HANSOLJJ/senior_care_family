@@ -13,7 +13,7 @@
 | **시그널링** | Firebase Realtime Database | offer/answer/ICE 교환 |
 | **인증** | Firebase Auth | Google/Apple/카카오/네이버 소셜 로그인 |
 | **푸시 알림** | Firebase Cloud Messaging (FCM) | 통화 수신, 복약 미확인 알림 |
-| **파일 저장** | Firebase Storage | 사진/영상 업로드 |
+| **파일 저장** | Firebase Storage | 사진 업로드 (임시 → Senior 다운로드 후 삭제) |
 | **오디오** | just_audio | 벨소리 재생 |
 | **에코 제거** | WebRTC AEC3 + RNNoise v0.2 (NDK/JNI) | 에코/노이즈 억제 |
 
@@ -37,43 +37,28 @@ E:\App\
 
 ```
 lib/
-├── main.dart                              # 앱 진입점 (Firebase 초기화만)
-├── app.dart                               # SeniorCareFamily 위젯 + 라우팅
+├── main.dart                              # 앱 진입점 (Firebase + RTDB persistence + 카카오 SDK 초기화)
+├── app.dart                               # SeniorCareFamily 위젯 + 인증/페어링 분기 라우팅
 │
 ├── config/
-│   └── app_config.dart                    # 기기 정보, Firebase 기기 등록
+│   └── app_config.dart                    # 기기 정보, Firebase 기기 등록 (fire-and-forget), DeviceProfile
 │
 ├── screens/
 │   ├── login_screen.dart                  # 소셜 로그인 (Google/Apple/카카오/네이버)
 │   ├── pairing_screen.dart                # 페어링 코드 입력 / QR 스캔
-│   ├── device_list_screen.dart            # 홈 — 시니어 기기 목록 + 상태
+│   ├── device_list_screen.dart            # 홈 — 다중 가족 탭 + 기기 목록 + 스토리지바
 │   ├── outgoing_call_screen.dart          # 발신 대기 + 영상통화
 │   ├── video_call_screen.dart             # 영상통화 화면
-│   ├── photo_upload_screen.dart           # 사진 선택 + 업로드
-│   └── reminder/
-│       ├── reminder_list_screen.dart      # 알림 목록 (복약/커스텀)
-│       ├── reminder_edit_screen.dart      # 알림 생성/수정 (시간, 반복, 영상 첨부)
-│       └── reminder_log_screen.dart       # 복약 확인/미확인 이력
+│   └── photo_upload_screen.dart           # 사진 선택/촬영 + 업로드 + 그리드 목록
 │
 ├── services/
-│   ├── auth_service.dart                  # 로그인/로그아웃/프로필
+│   ├── auth_service.dart                  # 로그인/로그아웃/프로필 (4종 소셜)
+│   ├── family_service.dart                # 가족 그룹 참가/탈퇴, 멤버 관리, 가족 이름 설정
 │   ├── fcm_service.dart                   # FCM 토큰 관리 + RTDB 저장
-│   ├── notification_service.dart          # 푸시 알림 수신/처리 (오프라인, 복약 미확인 등)
-│   ├── photo_service.dart                 # 사진 업로드/삭제/목록 (Storage + RTDB)
-│   │
-│   ├── family/
-│   │   ├── family_service.dart            # 가족 그룹 생성, 페어링, 초대 코드
-│   │   ├── member_service.dart            # 멤버 목록, 역할 관리, 멤버 제거
-│   │   └── device_service.dart            # 시니어 기기 상태 조회, 이름 변경, 연결 해제
-│   │
-│   ├── call/
-│   │   ├── signaling_service.dart         # RTDB 시그널링 (offer/answer/ICE)
-│   │   ├── webrtc_service.dart            # WebRTC 연결 (makeCall + 끊김감지)
-│   │   └── call_history_service.dart      # 통화 기록 (발신/부재중/통화시간)
-│   │
-│   └── reminder/
-│       ├── reminder_service.dart          # 스케줄 CRUD (시간, 반복, 영상 첨부)
-│       └── reminder_log_service.dart      # 확인/미확인 기록 조회, 알림 수신
+│   ├── photo_transfer_service.dart        # 사진 업로드/삭제/Storage 정리/실시간 목록
+│   └── call/
+│       ├── signaling_service.dart         # RTDB 시그널링 (offer/answer/ICE)
+│       └── webrtc_service.dart            # WebRTC 연결 (makeCall + 끊김감지)
 │
 └── widgets/                               # 공용 위젯 (필요시)
 ```
@@ -84,7 +69,8 @@ lib/
 android/app/src/main/
 ├── AndroidManifest.xml                    # 권한 (카메라, 마이크, 인터넷)
 ├── kotlin/com/seniorcare/family/
-│   └── MainActivity.kt                   # FlutterActivity (기본)
+│   ├── MainActivity.kt                   # FlutterActivity (기본)
+│   └── NaverLoginHelper.kt               # 네이버 SDK MethodChannel 브릿지
 └── google-services.json                   # Firebase 설정
 ```
 
@@ -95,7 +81,6 @@ functions/
 ├── index.js                              # Cloud Functions 진입점
 │   ├── kakaoCustomToken                  # 카카오 로그인 → Firebase Custom Token
 │   ├── naverCustomToken                  # 네이버 로그인 → Firebase Custom Token
-│   ├── naverCallback                     # 네이버 OAuth 리다이렉트
 │   └── cleanupExpiredPhotos              # 만료 사진 정리 (6시간마다 스케줄)
 ├── package.json                          # 의존성 (firebase-admin, firebase-functions)
 └── dcom-smart-frame-firebase-adminsdk-*.json  # 서비스 계정 키 (gitignore)
@@ -131,15 +116,38 @@ RTDB + Storage 스키마는 별도 문서 참조: [RTDB_schema.md](RTDB_schema.m
 ## 앱 화면 흐름
 
 ```
-앱 시작 → Firebase Auth 상태 확인
+앱 시작 → Firebase 초기화 + RTDB persistence + 기기 등록 (fire-and-forget)
+  ↓
+Firebase Auth 상태 확인
   ├─ 미로그인 → LoginScreen (Google/Apple/카카오/네이버)
   └─ 로그인됨 → 가족 그룹 확인
       ├─ 미페어링 → PairingScreen (코드 입력 / QR 스캔)
+      │              → 페어링 완료 시 가족 이름 입력 다이얼로그
       └─ 페어링됨 → DeviceListScreen (홈)
+          ├─ [다중 가족] 탭으로 전환 (롱프레스로 이름 변경)
           ├─ 기기 탭 → OutgoingCallScreen (영상통화 발신)
-          ├─ 사진 업로드 → PhotoUploadScreen
-          ├─ 복약 알림 → ReminderListScreen
-          └─ 설정 (로그아웃, 기기 관리, 가족 초대)
+          ├─ 사진 아이콘 → PhotoUploadScreen (갤러리/카메라 선택)
+          └─ 메뉴 → 가족 추가 / 페어링 해제 / 로그아웃
+```
+
+---
+
+## 사진 전송 흐름
+
+```
+[Family 앱] 사진 선택 → 리사이즈/압축 → 썸네일 생성 → MD5 체크섬
+    ↓
+Storage 업로드 (families/{familyId}/temp/{photoId}.jpg)
+    ↓
+RTDB 메타 등록 (families/{familyId}/photoSync/{photoId}, status: pending)
+    ↓
+[Senior 앱] PhotoReceiver가 RTDB 감시 → pending 감지
+    ↓
+status → downloading → Storage에서 다운로드 → MD5 검증
+    ↓
+status → done → Family 앱이 Storage 임시 파일 삭제
+    ↓
+[크래시 복구] downloading 상태 + processingIds에 없음 → pending으로 리셋 (최대 3회)
 ```
 
 ---
@@ -173,18 +181,19 @@ ICE candidate 교환 → WebRTC P2P 연결
 [Family 앱 - 최초 멤버]
   1. 소셜 로그인
   2. 코드 입력 or QR 스캔 → familyId 획득
-  3. /families/{familyId}/members/{userId} 추가 (role: admin)
-  4. Senior 감지 → 페어링 완료 → 슬라이드쇼 전환
+  3. /families/{familyId}/members/{userId} 추가 (role: family)
+  4. 가족 이름 입력 (예: 부모님, 장인어른)
+  5. Senior 감지 → 페어링 완료 → 슬라이드쇼 전환
 
-[Family 앱 - 추가 멤버]
-  1. 소셜 로그인
-  2. 기존 멤버가 공유한 초대 코드 입력
-  3. /families/{familyId}/members/{userId} 추가 (role: member)
+[Family 앱 - 추가 가족]
+  1. DeviceListScreen 메뉴 → "가족 추가"
+  2. 새 시니어 기기의 코드 입력 or QR 스캔
+  3. 가족 이름 입력 → 다중 가족 탭에 추가
 ```
 
 ---
 
-## 복약 알림 흐름
+## 복약 알림 흐름 (Phase 6 예정)
 
 ```
 [Family 앱] 스케줄 등록 (시간, 반복, 영상 첨부)
@@ -210,7 +219,7 @@ flutter build apk --release
 adb -s <serial> install -r build/app/outputs/flutter-apk/app-release.apk
 
 # 로그 확인
-adb -s <serial> shell logcat --pid=$(adb -s <serial> shell pidof com.seniorcare.family)
+adb -s <serial> logcat --pid=$(adb -s <serial> shell pidof com.seniorcare.family)
 ```
 
 ---
@@ -221,16 +230,17 @@ adb -s <serial> shell logcat --pid=$(adb -s <serial> shell pidof com.seniorcare.
 |--------|------|
 | `flutter_webrtc` (로컬) | WebRTC 영상통화 |
 | `firebase_core` | Firebase 초기화 |
-| `firebase_database` | RTDB 시그널링/기기등록/가족관리 |
+| `firebase_database` | RTDB 시그널링/기기등록/가족관리/사진동기화 |
 | `firebase_messaging` | FCM 푸시 알림 |
-| `firebase_auth` | 소셜 로그인 (Phase 2) |
-| `firebase_storage` | 사진/영상 업로드 (Phase 4) |
-| `google_sign_in` | Google 로그인 (Phase 2) |
-| `sign_in_with_apple` | Apple 로그인 (Phase 2) |
-| `kakao_flutter_sdk_user` | 카카오 로그인 (Phase 2) |
-| `flutter_naver_login` | 네이버 로그인 (Phase 2) |
-| `mobile_scanner` | QR 스캔 (Phase 3) |
-| `image_picker` | 사진 선택 (Phase 4) |
+| `firebase_auth` | 소셜 로그인 |
+| `firebase_storage` | 사진 업로드 |
+| `google_sign_in` | Google 로그인 |
+| `sign_in_with_apple` | Apple 로그인 |
+| `kakao_flutter_sdk_user` | 카카오 로그인 |
+| `mobile_scanner` | QR 스캔 |
+| `image_picker` | 사진 선택/촬영 |
+| `flutter_image_compress` | 사진 리사이즈/압축 |
+| `crypto` | MD5 체크섬 |
 | `just_audio` | 벨소리 재생 |
 | `wakelock_plus` | 화면 꺼짐 방지 |
 | `permission_handler` | 런타임 권한 |

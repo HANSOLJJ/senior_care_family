@@ -77,6 +77,23 @@ class FamilyService {
     return _db.ref('families/$familyId/members/$uid').onValue;
   }
 
+  /// 가족 그룹 이름 설정
+  Future<void> setFamilyName(String familyId, String name) async {
+    final user = _auth.currentUser;
+    if (user == null) return;
+    await _db.ref('users/${user.uid}/familyNames/$familyId').set(name);
+  }
+
+  /// 가족 그룹 이름 목록 조회
+  Future<Map<String, String>> getFamilyNames() async {
+    final user = _auth.currentUser;
+    if (user == null) return {};
+    final snap = await _db.ref('users/${user.uid}/familyNames').get();
+    if (!snap.exists) return {};
+    final data = Map<String, dynamic>.from(snap.value as Map);
+    return data.map((k, v) => MapEntry(k, v.toString()));
+  }
+
   /// 가족 그룹 탈퇴
   Future<void> leaveFamily(String familyId) async {
     final user = _auth.currentUser;
@@ -84,6 +101,7 @@ class FamilyService {
 
     await _db.ref('families/$familyId/members/${user.uid}').remove();
     await _db.ref('users/${user.uid}/familyIds/$familyId').remove();
+    await _db.ref('users/${user.uid}/familyNames/$familyId').remove();
     print('가족 그룹 탈퇴: $familyId');
   }
 }

@@ -22,6 +22,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   List<_PhotoItem> _photos = [];
   bool _uploading = false;
   double _uploadProgress = 0;
+  final _cleanedUpIds = <String>{};
 
   @override
   void initState() {
@@ -45,8 +46,9 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
         if (status == 'deleted' || status == 'expired') continue;
 
         // done 상태인데 storagePath가 남아있으면 Storage 임시 파일 정리
+        // 중복 호출 방지: cleanup → RTDB 변경 → onValue 재발동 연쇄 차단
         final storagePath = info['storagePath'] as String?;
-        if (status == 'done' && storagePath != null) {
+        if (status == 'done' && storagePath != null && _cleanedUpIds.add(id)) {
           _service.cleanupStorageFile(widget.familyId, id, storagePath);
         }
 

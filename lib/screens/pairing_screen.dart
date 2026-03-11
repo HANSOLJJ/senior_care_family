@@ -7,8 +7,9 @@ import '../services/auth_service.dart';
 /// 페어링 코드 입력 화면
 class PairingScreen extends StatefulWidget {
   final VoidCallback? onPaired;
+  final void Function(String familyId)? onPairedWithId;
 
-  const PairingScreen({super.key, this.onPaired});
+  const PairingScreen({super.key, this.onPaired, this.onPairedWithId});
 
   @override
   State<PairingScreen> createState() => _PairingScreenState();
@@ -30,8 +31,9 @@ class _PairingScreenState extends State<PairingScreen> {
     setState(() { _loading = true; _error = null; });
 
     try {
-      await _familyService.joinFamily(pairingCode);
+      final familyId = await _familyService.joinFamily(pairingCode);
       // 성공 → 부모에게 알림
+      widget.onPairedWithId?.call(familyId);
       widget.onPaired?.call();
     } catch (e) {
       if (mounted) {
