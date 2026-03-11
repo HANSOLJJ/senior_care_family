@@ -32,6 +32,7 @@ class WebRtcService {
   MediaStream? _remoteStream;
   String? _callId;
   bool _isHungUp = false;
+  bool _isMonitoring = false;
   Timer? _disconnectTimer;
   Timer? _aecStatsTimer;
 
@@ -54,8 +55,8 @@ class WebRtcService {
       'audio': true,
       'video': {
         'facingMode': 'user',
-        'width': 640,
-        'height': 480,
+        'width': 1280,
+        'height': 720,
       },
     });
   }
@@ -68,6 +69,7 @@ class WebRtcService {
     for (final track in _localStream!.getTracks()) {
       await pc.addTrack(track, _localStream!);
     }
+    await _setVideoBitrate(pc, 4000);
 
     // 원격 스트림 수신
     pc.onTrack = (RTCTrackEvent event) {
@@ -112,6 +114,24 @@ class WebRtcService {
     };
 
     return pc;
+  }
+
+  /// 비디오 sender의 maxBitrate를 설정 (화질 개선)
+  Future<void> _setVideoBitrate(RTCPeerConnection pc, int maxBitrateKbps) async {
+    final senders = await pc.getSenders();
+    for (final sender in senders) {
+      if (sender.track?.kind == 'video') {
+        final params = sender.parameters;
+        if (params.encodings == null || params.encodings!.isEmpty) {
+          params.encodings = [RTCRtpEncoding()];
+        }
+        params.encodings![0].maxBitrate = maxBitrateKbps * 1000;
+        params.encodings![0].minBitrate = 1000 * 1000;
+        params.degradationPreference = RTCDegradationPreference.MAINTAIN_RESOLUTION;
+        await sender.setParameters(params);
+        print('WebRTC: 비디오 설정 → min=1000kbps, max=${maxBitrateKbps}kbps, MAINTAIN_RESOLUTION');
+      }
+    }
   }
 
   /// 수신 처리: offer를 받아 answer를 보내고 연결
@@ -212,6 +232,7 @@ class WebRtcService {
     for (final track in _localStream!.getTracks()) {
       await pc.addTrack(track, _localStream!);
     }
+    await _setVideoBitrate(pc, 4000);
 
     pc.onTrack = (RTCTrackEvent event) {
       print('WebRTC: 원격 트랙 수신 kind=${event.track.kind}');
@@ -318,6 +339,180 @@ class WebRtcService {
     _startAecStats();
     return callId;
   }
+
+  /// 모니터링 발신: recvonly (카메라/마이크 OFF, Senior 영상만 수신)
+  Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName}) async {
+    _isHungUp = false;
+    _isMonitoring = true;
+    print('WebRTC: 모니터링 시작 → target=$targetDeviceId');
+
+    // PeerConnection 생성 — 로컬 미디어 없음
+    final pendingCandidates = <RTCIceCandidate>[];
+    String? resolvedCallId;
+
+    final pc = await createPeerConnection(_iceServers);
+    _peerConnection = pc;
+
+    // recvonly transceiver 추가 (영상+음성 수신만)
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+
+    pc.onTrack = (RTCTrackEvent event) {
+      print('WebRTC: 모니터링 원격 트랙 수신 kind=${event.track.kind}');
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+        remoteRenderer.srcObject = _remoteStream;
+      }
+    };
+
+    pc.onIceCandidate = (RTCIceCandidate candidate) {
+      if (resolvedCallId != null) {
+        _signaling.addCandidate(resolvedCallId, 'callerCandidates', {
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        });
+      } else {
+        pendingCandidates.add(candidate);
+      }
+    };
+
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      print('WebRTC: 모니터링 연결 상태 = $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _disconnectTimer?.cancel();
+        _disconnectTimer = Timer(const Duration(seconds: 5), () {
+          final currentState = _peerConnection?.connectionState;
+          if (currentState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+              currentState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+            hangUp();
+            onCallEnded?.call();
+          }
+        });
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _disconnectTimer?.cancel();
+        hangUp();
+        onCallEnded?.call();
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _disconnectTimer?.cancel();
+      }
+    };
+
+    // SDP offer 생성
+    final offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    // 시그널링: callType="monitor"
+    final callId = await _signaling.createCall(
+      {'sdp': offer.sdp, 'type': offer.type},
+      targetDeviceId: targetDeviceId,
+      callerUid: callerUid,
+      callerName: callerName,
+      callType: 'monitor',
+    );
+    _callId = callId;
+    resolvedCallId = callId;
+
+    await _signaling.setCallCleanupOnDisconnect(callId);
+
+    // 큐에 쌓인 ICE candidate 전송
+    for (final c in pendingCandidates) {
+      _signaling.addCandidate(callId, 'callerCandidates', {
+        'candidate': c.candidate,
+        'sdpMid': c.sdpMid,
+        'sdpMLineIndex': c.sdpMLineIndex,
+      });
+    }
+    pendingCandidates.clear();
+
+    // answer 감시
+    _signaling.listenForAnswer(callId, (answer) async {
+      if (_peerConnection?.signalingState ==
+          RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+        await _peerConnection?.setRemoteDescription(
+          RTCSessionDescription(answer['sdp'], answer['type']),
+        );
+      }
+    });
+
+    // ICE candidates 감시
+    _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
+      _peerConnection?.addCandidate(RTCIceCandidate(
+        candidate['candidate'],
+        candidate['sdpMid'],
+        candidate['sdpMLineIndex'],
+      ));
+    });
+
+    // 종료 감시
+    _signaling.listenForCallEnd(callId, () {
+      hangUp();
+      onCallEnded?.call();
+    });
+
+    print('WebRTC: 모니터링 발신 완료 callId=$callId');
+    return callId;
+  }
+
+  /// 모니터링 → 통화 전환 (renegotiation)
+  Future<void> upgradeToCall() async {
+    if (_peerConnection == null || _callId == null) return;
+    print('WebRTC: 모니터링 → 통화 전환');
+
+    // 로컬 미디어 획득
+    _localStream = await _getLocalStream();
+    localRenderer.srcObject = _localStream;
+
+    // 기존 transceiver를 sendrecv로 변경 + 로컬 트랙 추가
+    final transceivers = await _peerConnection!.getTransceivers();
+    for (final t in transceivers) {
+      final kind = t.sender.track?.kind ?? t.receiver.track?.kind;
+      if (kind == 'video') {
+        final videoTrack = _localStream!.getVideoTracks().firstOrNull;
+        if (videoTrack != null) {
+          await t.sender.replaceTrack(videoTrack);
+          await t.setDirection(TransceiverDirection.SendRecv);
+        }
+      } else if (kind == 'audio') {
+        final audioTrack = _localStream!.getAudioTracks().firstOrNull;
+        if (audioTrack != null) {
+          await t.sender.replaceTrack(audioTrack);
+          await t.setDirection(TransceiverDirection.SendRecv);
+        }
+      }
+    }
+
+    // 비트레이트 설정
+    await _setVideoBitrate(_peerConnection!, 4000);
+
+    // renegotiation offer 생성
+    final offer = await _peerConnection!.createOffer();
+    await _peerConnection!.setLocalDescription(offer);
+
+    // 전환 요청 + renegotiate offer 전송
+    await _signaling.requestUpgrade(_callId!);
+    await _signaling.sendRenegotiateOffer(_callId!, {
+      'sdp': offer.sdp,
+      'type': offer.type,
+    });
+
+    // renegotiate answer 감시
+    _signaling.listenForRenegotiateAnswer(_callId!, (answer) async {
+      await _peerConnection?.setRemoteDescription(
+        RTCSessionDescription(answer['sdp'], answer['type']),
+      );
+      print('WebRTC: 통화 전환 완료 (양방향)');
+      _isMonitoring = false;
+    });
+  }
+
+  bool get isMonitoring => _isMonitoring;
 
   /// 통화 종료
   Future<void> hangUp() async {

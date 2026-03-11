@@ -9,6 +9,9 @@ import 'package:firebase_database/firebase_database.dart';
 ///   - calleeCandidates/: ICE candidates (수신자)
 ///   - status: "ringing" | "connected" | "ended"
 ///   - targetDeviceId: 수신 대상 기기 ID
+///   - callType: "call" | "monitor" (모니터링/통화 구분)
+///   - upgradeRequest: "call" (모니터링→통화 전환 시)
+///   - renegotiateOffer/renegotiateAnswer: SDP renegotiation
 class SignalingService {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
   StreamSubscription? _callListener;
@@ -98,6 +101,7 @@ class SignalingService {
     required String targetDeviceId,
     String? callerUid,
     String? callerName,
+    String callType = 'call',
   }) async {
     final callRef = _db.child('calls').push();
     final callId = callRef.key!;
@@ -106,11 +110,12 @@ class SignalingService {
       'targetDeviceId': targetDeviceId,
       'callerUid': callerUid,
       'callerName': callerName ?? '가족',
+      'callType': callType,
       'status': 'ringing',
       'createdAt': ServerValue.timestamp,
     });
     _currentCallId = callId;
-    print('시그널링: 통화 생성 callId=$callId → target=$targetDeviceId, caller=$callerName');
+    print('시그널링: ${callType == "monitor" ? "모니터링" : "통화"} 생성 callId=$callId → target=$targetDeviceId');
     return callId;
   }
 
@@ -147,6 +152,30 @@ class SignalingService {
   /// 통화 데이터 삭제 (정리)
   Future<void> cleanupCall(String callId) async {
     await _db.child('calls/$callId').remove();
+  }
+
+  /// 모니터링 → 통화 전환 요청
+  Future<void> requestUpgrade(String callId) async {
+    await _db.child('calls/$callId/upgradeRequest').set('call');
+    print('시그널링: 통화 전환 요청 callId=$callId');
+  }
+
+  /// Renegotiation offer 전송 (모니터링→통화 전환 시)
+  Future<void> sendRenegotiateOffer(String callId, Map<String, dynamic> offer) async {
+    await _db.child('calls/$callId/renegotiateOffer').set(offer);
+    print('시그널링: renegotiate offer 전송 callId=$callId');
+  }
+
+  /// Renegotiation answer 감시
+  void listenForRenegotiateAnswer(
+    String callId,
+    void Function(Map<String, dynamic> answer) onAnswer,
+  ) {
+    _db.child('calls/$callId/renegotiateAnswer').onValue.listen((event) {
+      final data = event.snapshot.value as Map?;
+      if (data == null) return;
+      onAnswer(Map<String, dynamic>.from(data));
+    });
   }
 
   /// 앱 시작 시 잔존 통화 정리 (5분 이상 지난 통화 삭제)

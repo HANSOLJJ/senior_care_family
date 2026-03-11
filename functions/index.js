@@ -154,8 +154,8 @@ async function doCleanup() {
     for (const [photoId, photo] of Object.entries(photoSync)) {
       const { status, createdAt, storagePath } = photo;
 
-      // 7일 만료: pending → expired
-      if (status === "pending" && createdAt < expireCutoff) {
+      // 7일 만료: pending/downloading → expired
+      if ((status === "pending" || status === "downloading") && createdAt < expireCutoff) {
         if (storagePath) {
           try {
             await bucket.file(storagePath).delete();

@@ -46,7 +46,8 @@ lib/
 ├── screens/
 │   ├── login_screen.dart                  # 소셜 로그인 (Google/Apple/카카오/네이버)
 │   ├── pairing_screen.dart                # 페어링 코드 입력 / QR 스캔
-│   ├── device_list_screen.dart            # 홈 — 다중 가족 탭 + 기기 목록 + 스토리지바
+│   ├── device_list_screen.dart            # 홈 — 가족 목록 (1명이면 자동 상세 진입)
+│   ├── family_detail_screen.dart          # 가족 상세 — 기기상태/액션버튼/사진/멤버
 │   ├── outgoing_call_screen.dart          # 발신 대기 + 영상통화
 │   ├── video_call_screen.dart             # 영상통화 화면
 │   └── photo_upload_screen.dart           # 사진 선택/촬영 + 업로드 + 그리드 목록
@@ -123,11 +124,16 @@ Firebase Auth 상태 확인
   └─ 로그인됨 → 가족 그룹 확인
       ├─ 미페어링 → PairingScreen (코드 입력 / QR 스캔)
       │              → 페어링 완료 시 가족 이름 입력 다이얼로그
-      └─ 페어링됨 → DeviceListScreen (홈)
-          ├─ [다중 가족] 탭으로 전환 (롱프레스로 이름 변경)
-          ├─ 기기 탭 → OutgoingCallScreen (영상통화 발신)
-          ├─ 사진 아이콘 → PhotoUploadScreen (갤러리/카메라 선택)
-          └─ 메뉴 → 가족 추가 / 페어링 해제 / 로그아웃
+      └─ 페어링됨 → DeviceListScreen
+          ├─ [가족 1명] → FamilyDetailScreen 바로 진입
+          └─ [가족 2명+] → 가족 목록 → 탭 → FamilyDetailScreen
+              ├─ 기기 상태 (온라인/오프라인/통화 중)
+              ├─ 영상통화 버튼 → OutgoingCallScreen
+              ├─ 사진 보내기 버튼 → PhotoUploadScreen
+              ├─ 영상 알림 버튼 (Phase 6 stub)
+              ├─ 최근 보낸 사진 썸네일
+              ├─ 가족 멤버 목록
+              └─ 메뉴 → 가족 추가 / 페어링 해제 / 로그아웃
 ```
 
 ---

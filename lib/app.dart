@@ -27,10 +27,11 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
   }
 
   Future<void> _initServices() async {
-    // fire-and-forget: RTDB 연결 지연 시에도 UI 즉시 표시
-    AppConfig.registerDevice().then((_) {}).catchError((e) {
-      print('기기 등록 실패: $e');
-    });
+    try {
+      await AppConfig.registerDevice().timeout(const Duration(seconds: 10));
+    } catch (e) {
+      print('기기 등록 실패/타임아웃: $e');
+    }
   }
 
   @override
@@ -47,7 +48,9 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
           if (snapshot.connectionState == ConnectionState.waiting) {
             return const Scaffold(
               backgroundColor: Colors.black,
-              body: Center(child: CircularProgressIndicator(color: Colors.white)),
+              body: Center(
+                child: CircularProgressIndicator(color: Colors.white),
+              ),
             );
           }
 
@@ -94,7 +97,10 @@ class _PairingGateState extends State<_PairingGate> {
     try {
       final ids = await _familyService.getMyFamilyIds();
       if (mounted) {
-        setState(() { _familyIds = ids; _loading = false; });
+        setState(() {
+          _familyIds = ids;
+          _loading = false;
+        });
         // 모든 가족 그룹의 멤버십 실시간 감시
         for (final id in ids) {
           _watchMembership(id);
@@ -102,7 +108,11 @@ class _PairingGateState extends State<_PairingGate> {
       }
     } catch (e) {
       print('페어링 확인 실패: $e');
-      if (mounted) setState(() { _familyIds = []; _loading = false; });
+      if (mounted)
+        setState(() {
+          _familyIds = [];
+          _loading = false;
+        });
     }
   }
 
@@ -118,7 +128,9 @@ class _PairingGateState extends State<_PairingGate> {
         if (mounted) {
           // 해당 familyId만 제거
           final updated = List<String>.from(_familyIds ?? [])..remove(familyId);
-          setState(() { _familyIds = updated; });
+          setState(() {
+            _familyIds = updated;
+          });
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(
               content: Text('시니어 기기에서 연결이 해제되었습니다'),
@@ -201,9 +213,6 @@ class _PairingGateState extends State<_PairingGate> {
     }
 
     // 페어링됨 → 기기 목록
-    return DeviceListScreen(
-      familyIds: _familyIds!,
-      onAddFamily: _checkPairing,
-    );
+    return DeviceListScreen(familyIds: _familyIds!, onAddFamily: _checkPairing);
   }
 }
