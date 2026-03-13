@@ -10,6 +10,7 @@ import 'outgoing_call_screen.dart';
 import 'photo_upload_screen.dart';
 import 'monitoring_screen.dart';
 import 'pairing_screen.dart';
+import 'reminder/reminder_list_screen.dart';
 
 /// 가족 상세 페이지 — 기기 상태 + 액션 버튼 + 사진 + 멤버
 class FamilyDetailScreen extends StatefulWidget {
@@ -175,8 +176,10 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   }
 
   void _openVideoReminder() {
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('영상 알림 기능 준비 중입니다')),
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ReminderListScreen(familyId: widget.familyId),
+      ),
     );
   }
 
