@@ -204,6 +204,18 @@ async function doCleanup() {
         console.log(`만료 처리: families/${familyId}/photoSync/${photoId}`);
       }
 
+      // done → Storage 삭제 (Senior가 못 지운 경우 보험)
+      if (status === "done" && storagePath) {
+        try {
+          await bucket.file(storagePath).delete();
+          console.log(`done Storage 삭제: ${storagePath}`);
+        } catch (e) { /* 이미 삭제됐을 수 있음 */ }
+        await admin.database()
+          .ref(`families/${familyId}/photoSync/${photoId}/storagePath`)
+          .remove();
+        cleaned++;
+      }
+
       // 37일 정리: expired → 완전 삭제
       if (status === "expired" && createdAt < cleanupCutoff) {
         await admin.database()
