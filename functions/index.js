@@ -23,6 +23,9 @@
  * - cleanupExpiredPhotosManual : 만료 사진 정리 — 수동 HTTP 트리거
  * - cleanupOrphanedData    : 고아 데이터 정리 — 매일 새벽 3시 자동 실행 (스케줄)
  * - cleanupOrphanedDataManual : 고아 데이터 정리 — 수동 HTTP 트리거
+ * - onPhotoDownloaded      : 사진 다운로드 완료 → 모든 Senior 완료 시 Storage 삭제 (RTDB 트리거)
+ * - onReminderMediaDownloaded : 알림 미디어 다운로드 완료 → Storage 삭제 (RTDB 트리거)
+ * - onReminderDeleted      : 알림 삭제 → Storage 파일 삭제 (RTDB 트리거)
  *
  * === 수동 테스트 ===
  * 브라우저에서 URL 호출:
@@ -38,6 +41,7 @@ const serviceAccount = require("./dcom-smart-frame-firebase-adminsdk-fbsvc-59231
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
   databaseURL: "https://dcom-smart-frame-default-rtdb.firebaseio.com",
+  storageBucket: "dcom-smart-frame.firebasestorage.app",
 });
 
 // null/undefined 필드를 제거하는 헬퍼
@@ -418,3 +422,118 @@ exports.cleanupOrphanedDataManual = functions.https.onRequest(async (req, res) =
     timestamp: new Date().toISOString(),
   });
 });
+
+// ============================================================
+// RTDB 트리거: 사진 다운로드 완료 → 모든 Senior 완료 시 Storage 삭제
+// ============================================================
+exports.onPhotoDownloaded = functions.database
+  .ref("/families/{familyId}/photoSync/{photoId}/downloadedBy/{deviceId}")
+  .onCreate(async (snapshot, context) => {
+    const { familyId, photoId } = context.params;
+    const db = admin.database();
+
+    // 현재 사진 메타 읽기
+    const photoSnap = await db
+      .ref(`families/${familyId}/photoSync/${photoId}`)
+      .once("value");
+    const photo = photoSnap.val();
+    if (!photo || photo.status === "done") return null;
+
+    // downloadedBy 수
+    const downloadedBy = photo.downloadedBy || {};
+    const downloadedCount = Object.keys(downloadedBy).length;
+
+    // 가족 내 Senior 기기 수
+    const devicesSnap = await db
+      .ref(`families/${familyId}/devices`)
+      .once("value");
+    const devices = devicesSnap.val() || {};
+    const seniorCount = Object.keys(devices).length;
+
+    console.log(
+      `onPhotoDownloaded: ${photoId} — ${downloadedCount}/${seniorCount} Senior 완료`
+    );
+
+    if (downloadedCount < seniorCount) return null;
+
+    // 모든 Senior 다운로드 완료 → Storage 삭제 + status: done
+    if (photo.storagePath) {
+      try {
+        await admin.storage().bucket().file(photo.storagePath).delete();
+        console.log(`Storage 삭제: ${photo.storagePath}`);
+      } catch (e) {
+        console.warn(`Storage 삭제 실패 (무시): ${e.message}`);
+      }
+    }
+
+    await db.ref(`families/${familyId}/photoSync/${photoId}`).update({
+      status: "done",
+      completedAt: admin.database.ServerValue.TIMESTAMP,
+    });
+
+    return null;
+  });
+
+// ============================================================
+// RTDB 트리거: 알림 미디어 다운로드 완료 → Storage 삭제
+// ============================================================
+exports.onReminderMediaDownloaded = functions.database
+  .ref("/families/{familyId}/reminders/{reminderId}/mediaDownloaded")
+  .onUpdate(async (change, context) => {
+    const after = change.after.val();
+    if (after !== true) return null;
+
+    const { familyId, reminderId } = context.params;
+    const db = admin.database();
+
+    // 알림 메타 읽기
+    const reminderSnap = await db
+      .ref(`families/${familyId}/reminders/${reminderId}`)
+      .once("value");
+    const reminder = reminderSnap.val();
+    if (!reminder) return null;
+
+    // Storage 미디어 삭제
+    const storagePath = `families/${familyId}/reminders/${reminderId}`;
+    try {
+      const [files] = await admin
+        .storage()
+        .bucket()
+        .getFiles({ prefix: storagePath });
+      for (const file of files) {
+        await file.delete();
+        console.log(`Storage 삭제: ${file.name}`);
+      }
+    } catch (e) {
+      console.warn(`Storage 삭제 실패 (무시): ${e.message}`);
+    }
+
+    return null;
+  });
+
+// ============================================================
+// RTDB 트리거: 알림 삭제 → Storage 파일 삭제
+// ============================================================
+exports.onReminderDeleted = functions.database
+  .ref("/families/{familyId}/reminders/{reminderId}")
+  .onDelete(async (snapshot, context) => {
+    const { familyId, reminderId } = context.params;
+    const reminder = snapshot.val();
+
+    // Storage 미디어 삭제
+    const storagePath = `families/${familyId}/reminders/${reminderId}`;
+    try {
+      const [files] = await admin
+        .storage()
+        .bucket()
+        .getFiles({ prefix: storagePath });
+      for (const file of files) {
+        await file.delete();
+        console.log(`onReminderDeleted: Storage 삭제 ${file.name}`);
+      }
+    } catch (e) {
+      console.warn(`onReminderDeleted: Storage 삭제 실패 (무시): ${e.message}`);
+    }
+
+    return null;
+  });

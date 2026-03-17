@@ -101,17 +101,8 @@ class PhotoTransferService {
     print('사진 삭제 요청: $photoId → deleted');
   }
 
-  /// Storage 임시 파일 삭제 (Senior가 done 처리한 후 Family가 정리)
-  Future<void> cleanupStorageFile(String familyId, String photoId, String storagePath) async {
-    try {
-      await _storage.ref(storagePath).delete();
-      // storagePath 필드 제거 (이미 삭제됨을 표시)
-      await _db.ref('families/$familyId/photoSync/$photoId/storagePath').remove();
-      print('Storage 정리 완료: $storagePath');
-    } catch (e) {
-      print('Storage 정리 실패: $e');
-    }
-  }
+  // Storage 삭제는 Cloud Function(onPhotoDownloaded)이 담당.
+  // Family 앱에서 직접 삭제하지 않음.
 
   /// 보낸 사진 목록 실시간 스트림
   Stream<DatabaseEvent> watchPhotoSync(String familyId) {

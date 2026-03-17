@@ -99,12 +99,7 @@ class ReminderService {
 
     // 1. Storage 업로드
     final ext = mediaType == 'video' ? 'mp4' : 'm4a';
-    final creatorName = _auth.currentUser?.displayName ?? '가족';
-    final dateStr = DateTime.now().toString().substring(0, 10).replaceAll('-', '');
-    final safeTitle = title.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
-    final safeName = creatorName.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
-    final fileName = '${safeTitle}_${safeName}_$dateStr.$ext';
-    final storagePath = 'families/$familyId/reminders/$reminderId/$fileName';
+    final storagePath = 'families/$familyId/reminders/$reminderId/$reminderId.$ext';
     final ref = _storage.ref(storagePath);
 
     final bytes = await mediaFile.readAsBytes();
@@ -130,7 +125,7 @@ class ReminderService {
     // 3. RTDB 쓰기
     final createdByName = user.displayName ?? '가족';
     final repeatLabel = repeat == 'daily' ? '매일' : repeat;
-    final label = '$title $time $repeatLabel [ON]';
+    final label = '$title $time $repeatLabel by $createdByName [ON]';
     await _db.ref('families/$familyId/reminders/$reminderId').set({
       '_label': label,
       'title': title,
@@ -145,6 +140,7 @@ class ReminderService {
       'enabled': true,
       'createdBy': user.uid,
       'createdByName': createdByName,
+      'mediaDownloaded': false,
       'targetDeviceId': null,
       'targetDeviceName': null,
       'createdAt': ServerValue.timestamp,
@@ -201,14 +197,8 @@ class ReminderService {
 
       // 새 파일 업로드
       final ext = mediaType == 'video' ? 'mp4' : 'm4a';
-      final reminderTitle = title ?? updates['title'] as String? ?? 'reminder';
-      final creatorName = _auth.currentUser?.displayName ?? '가족';
-      final dateStr = DateTime.now().toString().substring(0, 10).replaceAll('-', '');
-      final safeTitle = reminderTitle.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
-      final safeName = creatorName.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
-      final fileName = '${safeTitle}_${safeName}_$dateStr.$ext';
       final storagePath =
-          'families/$familyId/reminders/$reminderId/$fileName';
+          'families/$familyId/reminders/$reminderId/$reminderId.$ext';
       final ref = _storage.ref(storagePath);
       final bytes = await mediaFile.readAsBytes();
       final uploadTask = ref.putData(
@@ -227,6 +217,7 @@ class ReminderService {
       await uploadTask;
       updates['mediaUrl'] = await ref.getDownloadURL();
       updates['mediaType'] = mediaType;
+      updates['mediaDownloaded'] = false; // Senior 재다운로드 필요
       print('Reminder 미디어 재업로드: $storagePath');
     }
 
@@ -235,20 +226,9 @@ class ReminderService {
   }
 
   /// 알림 삭제
+  /// RTDB 노드 삭제 → Cloud Function(onReminderDeleted)이 Storage 삭제
+  /// → Senior가 감지 → 알람 취소 + 로컬 미디어 삭제
   Future<void> deleteReminder(String familyId, String reminderId) async {
-    // Storage 삭제
-    try {
-      final listResult = await _storage
-          .ref('families/$familyId/reminders/$reminderId')
-          .listAll();
-      for (final item in listResult.items) {
-        await item.delete();
-      }
-    } catch (e) {
-      print('Reminder Storage 삭제 실패: $e');
-    }
-
-    // RTDB 삭제
     await _db.ref('families/$familyId/reminders/$reminderId').remove();
     print('Reminder 삭제: $reminderId');
   }
