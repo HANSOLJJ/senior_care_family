@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../../config/app_config.dart';
 import 'signaling_service.dart';
 
 const _iceServers = {
@@ -213,7 +214,7 @@ class WebRtcService {
   }
 
   /// 발신 처리: offer를 생성하여 전송하고 answer를 기다림
-  Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName}) async {
+  Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     print('WebRTC: 발신 시작 → target=$targetDeviceId');
 
@@ -289,6 +290,8 @@ class WebRtcService {
       targetDeviceId: targetDeviceId,
       callerUid: callerUid,
       callerName: callerName,
+      callerDeviceId: AppConfig.deviceId,
+      targetFamilyId: familyId,
     );
     _callId = callId;
     resolvedCallId = callId;
@@ -341,7 +344,7 @@ class WebRtcService {
   }
 
   /// 모니터링 발신: recvonly (카메라/마이크 OFF, Senior 영상만 수신)
-  Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName}) async {
+  Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     _isMonitoring = true;
     print('WebRTC: 모니터링 시작 → target=$targetDeviceId');
@@ -414,6 +417,8 @@ class WebRtcService {
       targetDeviceId: targetDeviceId,
       callerUid: callerUid,
       callerName: callerName,
+      callerDeviceId: AppConfig.deviceId,
+      targetFamilyId: familyId,
       callType: 'monitor',
     );
     _callId = callId;

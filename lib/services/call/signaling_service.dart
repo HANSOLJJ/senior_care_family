@@ -101,15 +101,22 @@ class SignalingService {
     required String targetDeviceId,
     String? callerUid,
     String? callerName,
+    String? callerDeviceId,
+    String? targetFamilyId,
     String callType = 'call',
   }) async {
     final callRef = _db.child('calls').push();
     final callId = callRef.key!;
+    final name = callerName ?? '가족';
+    final label = '$name → $targetDeviceId ($callType) ringing';
     await callRef.set({
+      '_label': label,
       'offer': offer,
       'targetDeviceId': targetDeviceId,
+      'targetFamilyId': targetFamilyId,
       'callerUid': callerUid,
-      'callerName': callerName ?? '가족',
+      'callerName': name,
+      'callerDeviceId': callerDeviceId,
       'callType': callType,
       'status': 'ringing',
       'createdAt': ServerValue.timestamp,

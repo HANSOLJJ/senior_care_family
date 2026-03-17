@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'package:flutter/services.dart';
-import 'package:firebase_database/firebase_database.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
 /// Senior 태블릿 디바이스 프로필 (JSON에서 로드)
@@ -71,7 +70,17 @@ class AppConfig {
     final deviceInfo = DeviceInfoPlugin();
     final android = await deviceInfo.androidInfo;
     deviceModel = android.model;
-    deviceId = android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
+
+    // ANDROID_ID 가져오기 (Settings.Secure.ANDROID_ID, 기기별 고유)
+    try {
+      const channel = MethodChannel('com.seniorcare.family/device');
+      final androidId = await channel.invokeMethod<String>('getAndroidId');
+      deviceId = androidId ?? android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
+    } catch (e) {
+      // MethodChannel 실패 시 fallback
+      deviceId = android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
+      print('ANDROID_ID 가져오기 실패, fallback 사용: $e');
+    }
     print('AppConfig: model=$deviceModel, id=$deviceId');
   }
 
@@ -90,37 +99,6 @@ class AppConfig {
     }
   }
 
-  /// Firebase RTDB에 기기 등록 + onDisconnect 설정
-  static Future<void> registerDevice() async {
-    if (deviceId.isEmpty) return;
-    final db = FirebaseDatabase.instance;
-    final deviceRef = db.ref('devices/$deviceId');
-
-    await deviceRef.update({
-      'model': deviceModel,
-      'name': deviceModel,
-      'lastSeen': ServerValue.timestamp,
-      'online': true,
-    });
-    await deviceRef.onDisconnect().update({
-      'online': false,
-      'lastSeen': ServerValue.timestamp,
-    });
-    print('기기 등록 완료: $deviceModel ($deviceId)');
-
-    db.ref('.info/connected').onValue.listen((event) async {
-      final connected = event.snapshot.value as bool? ?? false;
-      if (connected) {
-        print('RTDB 재연결 → online 복구');
-        await deviceRef.update({
-          'online': true,
-          'lastSeen': ServerValue.timestamp,
-        });
-        await deviceRef.onDisconnect().update({
-          'online': false,
-          'lastSeen': ServerValue.timestamp,
-        });
-      }
-    });
-  }
+  // Family 기기는 /devices/에 등록하지 않음.
+  // Family 사용자는 /users/{uid}로만 식별.
 }

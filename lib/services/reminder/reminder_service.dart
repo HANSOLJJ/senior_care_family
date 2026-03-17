@@ -123,7 +123,11 @@ class ReminderService {
     // 2. 미디어 길이 측정은 caller가 전달 (image_picker의 duration)
 
     // 3. RTDB 쓰기
+    final createdByName = user.displayName ?? '가족';
+    final repeatLabel = repeat == 'daily' ? '매일' : repeat;
+    final label = '$title $time $repeatLabel [ON]';
     await _db.ref('families/$familyId/reminders/$reminderId').set({
+      '_label': label,
       'title': title,
       'mediaUrl': downloadUrl,
       'mediaType': mediaType,
@@ -135,7 +139,9 @@ class ReminderService {
       },
       'enabled': true,
       'createdBy': user.uid,
-      'createdByName': user.displayName ?? '가족',
+      'createdByName': createdByName,
+      'targetDeviceId': null,
+      'targetDeviceName': null,
       'createdAt': ServerValue.timestamp,
       'updatedAt': ServerValue.timestamp,
     });

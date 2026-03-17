@@ -2,9 +2,9 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
-import '../config/app_config.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
+import '../services/pairing_helper.dart';
 import '../services/photo_transfer_service.dart';
 import 'outgoing_call_screen.dart';
 import 'photo_upload_screen.dart';
@@ -66,18 +66,26 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   }
 
   void _watchDevices() {
-    final sub = _db.ref('families/${widget.familyId}/devices').onValue.listen((event) {
-      final data = event.snapshot.value as Map?;
+    // /families/{fid}/devices/ → deviceId 목록 (값은 true)
+    final sub = _db.ref('families/${widget.familyId}/devices').onValue.listen((event) async {
+      final data = event.snapshot.value;
       if (data == null) {
         if (mounted) setState(() { _devices = []; _loading = false; });
         return;
       }
 
+      // deviceId 목록 추출
+      final deviceIds = <String>[];
+      if (data is Map) {
+        deviceIds.addAll(data.keys.cast<String>());
+      }
+
+      // 각 /devices/{did}에서 상세 정보 읽기
       final list = <Map<String, dynamic>>[];
-      for (final entry in data.entries) {
-        final id = entry.key as String;
-        if (id == AppConfig.deviceId) continue;
-        final info = Map<String, dynamic>.from(entry.value as Map);
+      for (final id in deviceIds) {
+        final snap = await _db.ref('devices/$id').get();
+        if (!snap.exists) continue;
+        final info = Map<String, dynamic>.from(snap.value as Map);
         info['id'] = id;
         list.add(info);
       }
@@ -216,8 +224,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
       MaterialPageRoute(
         builder: (_) => PairingScreen(
           onPairedWithId: (familyId) async {
-            Navigator.of(context).pop();
-            await _promptFamilyName(familyId);
+            await PairingHelper.onPairingComplete(context, familyId);
+            if (context.mounted) Navigator.of(context).pop();
             widget.onAddFamily?.call();
           },
         ),
@@ -225,47 +233,6 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
     );
   }
 
-  Future<void> _promptFamilyName(String familyId) async {
-    final controller = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('가족 이름 지정', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: '예: 부모님, 장인어른',
-            hintStyle: TextStyle(color: Colors.grey[600]),
-            filled: true,
-            fillColor: Colors.grey[800],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
-          ),
-          onSubmitted: (v) => Navigator.pop(context, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('건너뛰기'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('저장'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (name != null && name.isNotEmpty) {
-      await _familyService.setFamilyName(familyId, name);
-    }
-  }
 
   @override
   void dispose() {

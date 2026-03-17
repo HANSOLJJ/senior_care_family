@@ -71,14 +71,17 @@ class PhotoTransferService {
     print('Storage 업로드 완료: $storagePath');
 
     // 5. RTDB 메타데이터 등록
+    final uploadedByName = user.displayName ?? '가족';
+    final label = '$fileName (pending, $uploadedByName)';
     await _db.ref('families/$familyId/photoSync/$photoId').set({
+      '_label': label,
       'fileName': fileName,
       'size': compressed.length,
       'checksum': checksum,
       'storageUrl': downloadUrl,
       'storagePath': storagePath,
       'uploadedBy': user.uid,
-      'uploadedByName': user.displayName ?? '가족',
+      'uploadedByName': uploadedByName,
       'createdAt': ServerValue.timestamp,
       'status': 'pending',
       'retryCount': 0,

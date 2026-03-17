@@ -1,3 +1,35 @@
+/**
+ * Senior Care — Cloud Functions
+ *
+ * === 배포 방법 ===
+ * cd functions
+ * npm install              # 최초 1회 또는 의존성 변경 시
+ * firebase deploy --only functions
+ *
+ * 특정 함수만 배포:
+ * firebase deploy --only functions:kakaoCustomToken,functions:cleanupOrphanedData
+ *
+ * === Firebase Console에서 확인 ===
+ * 1. https://console.firebase.google.com → dcom-smart-frame 프로젝트
+ * 2. 왼쪽 메뉴 → 호스팅, 서버리스 → Functions
+ * 3. 대시보드: 배포된 함수 목록, 리전, 트리거 타입, 마지막 배포 시간
+ * 4. 로그: 각 함수 클릭 → "로그 보기" 또는 상단 "로그" 탭
+ *    - 실행 시간, 에러, console.log 출력 전부 확인 가능
+ *
+ * === 함수 목록 ===
+ * - kakaoCustomToken       : 카카오 로그인 → Firebase Custom Token (onCall)
+ * - naverCustomToken       : 네이버 로그인 → Firebase Custom Token (onCall)
+ * - cleanupExpiredPhotos   : 만료 사진 정리 — 6시간마다 자동 실행 (스케줄)
+ * - cleanupExpiredPhotosManual : 만료 사진 정리 — 수동 HTTP 트리거
+ * - cleanupOrphanedData    : 고아 데이터 정리 — 매일 새벽 3시 자동 실행 (스케줄)
+ * - cleanupOrphanedDataManual : 고아 데이터 정리 — 수동 HTTP 트리거
+ *
+ * === 수동 테스트 ===
+ * 브라우저에서 URL 호출:
+ * https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupExpiredPhotosManual
+ * https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupOrphanedDataManual
+ */
+
 const functions = require("firebase-functions");
 const admin = require("firebase-admin");
 const fetch = require("node-fetch");
@@ -206,6 +238,143 @@ exports.cleanupExpiredPhotosManual = functions.https.onRequest(async (req, res) 
     success: true,
     expired: result.expired,
     cleaned: result.cleaned,
+    timestamp: new Date().toISOString(),
+  });
+});
+
+// ─── 고아 데이터 정리 (와치독) ───
+
+const DEVICE_OFFLINE_DAYS = 7;
+
+/**
+ * 고아 데이터 정리 로직 (스케줄 + 수동 공용)
+ *
+ * Step 1: 유령 디바이스 정리 (offline + 7일)
+ * Step 2: 가족 내 유령 디바이스 정리
+ * Step 3: 고아 가족 정리 (멤버 0 + 디바이스 0)
+ * Step 4: 고아 페어링 코드 정리
+ * Step 5: 고아 유저 참조 정리
+ */
+async function doOrphanCleanup() {
+  const db = admin.database();
+  const now = Date.now();
+  const offlineCutoff = now - DEVICE_OFFLINE_DAYS * 24 * 60 * 60 * 1000;
+  const result = { devices: 0, familyDevices: 0, families: 0, pairingCodes: 0, userRefs: 0 };
+
+  // Step 1: 유령 디바이스 정리
+  const devicesSnap = await db.ref("devices").once("value");
+  const devices = devicesSnap.val() || {};
+  const activeDeviceIds = new Set();
+
+  for (const [deviceId, device] of Object.entries(devices)) {
+    const lastSeen = device.lastSeen || 0;
+    const online = device.online || false;
+    if (!online && lastSeen < offlineCutoff) {
+      // /families/{fid}/devices/{did}도 삭제
+      const fid = device.familyId;
+      if (fid) {
+        await db.ref(`families/${fid}/devices/${deviceId}`).remove();
+      }
+      await db.ref(`devices/${deviceId}`).remove();
+      result.devices++;
+      console.log(`Step1: 유령 디바이스 삭제: ${deviceId} (familyId: ${fid}, lastSeen: ${new Date(lastSeen).toISOString()})`);
+    } else {
+      activeDeviceIds.add(deviceId);
+    }
+  }
+
+  // Step 2~5: 가족 단위 정리
+  const familiesSnap = await db.ref("families").once("value");
+  const families = familiesSnap.val() || {};
+
+  const activeFamilyIds = new Set();
+
+  for (const [familyId, family] of Object.entries(families)) {
+    // Step 2: 가족 내 유령 디바이스 정리
+    // - /devices/에 없거나
+    // - /devices/{did}/familyId가 이 가족이 아닌 경우 (다른 가족으로 이동함)
+    const familyDevices = family.devices || {};
+    for (const deviceId of Object.keys(familyDevices)) {
+      const globalDevice = devices[deviceId];
+      const isOrphan = !activeDeviceIds.has(deviceId) ||
+        (globalDevice && globalDevice.familyId && globalDevice.familyId !== familyId);
+      if (isOrphan) {
+        await db.ref(`families/${familyId}/devices/${deviceId}`).remove();
+        result.familyDevices++;
+        console.log(`Step2: 가족 내 유령 디바이스 삭제: families/${familyId}/devices/${deviceId}`);
+      }
+    }
+
+    // Step 3: 고아 가족 정리 (멤버 0 + 디바이스 0 → 완전히 버려진 가족)
+    const membersSnap = await db.ref(`families/${familyId}/members`).once("value");
+    const devicesSnap2 = await db.ref(`families/${familyId}/devices`).once("value");
+    const memberCount = membersSnap.numChildren();
+    const deviceCount = devicesSnap2.numChildren();
+
+    if (memberCount === 0 && deviceCount === 0) {
+      // 페어링 코드도 삭제
+      const pairingCode = family.pairingCode;
+      if (pairingCode) {
+        await db.ref(`pairingCodes/${pairingCode}`).remove();
+      }
+      await db.ref(`families/${familyId}`).remove();
+      result.families++;
+      console.log(`Step3: 고아 가족 삭제: ${familyId} (pairingCode: ${pairingCode})`);
+    } else {
+      activeFamilyIds.add(familyId);
+    }
+  }
+
+  // Step 4: 고아 페어링 코드 정리
+  const codesSnap = await db.ref("pairingCodes").once("value");
+  const codes = codesSnap.val() || {};
+  for (const [code, familyId] of Object.entries(codes)) {
+    if (!activeFamilyIds.has(familyId)) {
+      await db.ref(`pairingCodes/${code}`).remove();
+      result.pairingCodes++;
+      console.log(`Step4: 고아 페어링 코드 삭제: ${code} → ${familyId}`);
+    }
+  }
+
+  // Step 5: 고아 유저 참조 정리
+  const usersSnap = await db.ref("users").once("value");
+  const users = usersSnap.val() || {};
+  for (const [uid, userData] of Object.entries(users)) {
+    const familyIds = userData.familyIds || {};
+    for (const familyId of Object.keys(familyIds)) {
+      if (!activeFamilyIds.has(familyId)) {
+        await db.ref(`users/${uid}/familyIds/${familyId}`).remove();
+        await db.ref(`users/${uid}/familyNames/${familyId}`).remove();
+        result.userRefs++;
+        console.log(`Step5: 고아 유저 참조 삭제: users/${uid}/familyIds/${familyId}`);
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * 스케줄 함수: 매일 새벽 3시 (KST) 실행
+ * UTC 기준 18:00 = KST 03:00
+ */
+exports.cleanupOrphanedData = functions.pubsub
+  .schedule("every day 18:00")
+  .timeZone("UTC")
+  .onRun(async () => {
+    const result = await doOrphanCleanup();
+    console.log(`고아 정리 완료: 디바이스=${result.devices}, 가족디바이스=${result.familyDevices}, 가족=${result.families}, 코드=${result.pairingCodes}, 유저참조=${result.userRefs}`);
+    return null;
+  });
+
+/**
+ * HTTP 함수: 테스트용 수동 호출
+ */
+exports.cleanupOrphanedDataManual = functions.https.onRequest(async (req, res) => {
+  const result = await doOrphanCleanup();
+  res.json({
+    success: true,
+    ...result,
     timestamp: new Date().toISOString(),
   });
 });

@@ -1,9 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
-import '../config/app_config.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
+import '../services/pairing_helper.dart';
 import 'family_detail_screen.dart';
 import 'pairing_screen.dart';
 
@@ -57,14 +58,14 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       final sub = FirebaseDatabase.instance
           .ref('families/$familyId/devices')
           .onValue
-          .listen((event) {
-        final data = event.snapshot.value as Map?;
+          .listen((event) async {
+        final data = event.snapshot.value;
         bool hasOnline = false;
-        if (data != null) {
-          for (final entry in data.entries) {
-            if (entry.key == AppConfig.deviceId) continue;
-            final info = entry.value as Map;
-            if (info['online'] == true) {
+        if (data != null && data is Map) {
+          // deviceId 목록에서 각 /devices/{did}/online 확인
+          for (final deviceId in data.keys) {
+            final snap = await FirebaseDatabase.instance.ref('devices/$deviceId/online').get();
+            if (snap.value == true) {
               hasOnline = true;
               break;
             }
@@ -92,8 +93,8 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
       MaterialPageRoute(
         builder: (_) => PairingScreen(
           onPairedWithId: (familyId) async {
-            Navigator.of(context).pop();
-            await _promptFamilyName(familyId);
+            await PairingHelper.onPairingComplete(context, familyId);
+            if (context.mounted) Navigator.of(context).pop();
             widget.onAddFamily?.call();
             _loadFamilyNames();
           },
@@ -102,47 +103,6 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     );
   }
 
-  Future<void> _promptFamilyName(String familyId) async {
-    final controller = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('가족 이름 지정', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: '예: 부모님, 장인어른',
-            hintStyle: TextStyle(color: Colors.grey[600]),
-            filled: true,
-            fillColor: Colors.grey[800],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
-          ),
-          onSubmitted: (v) => Navigator.pop(context, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('건너뛰기'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('저장'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (name != null && name.isNotEmpty) {
-      await _familyService.setFamilyName(familyId, name);
-    }
-  }
 
   void _openFamily(String familyId, String name) {
     Navigator.of(context).push(

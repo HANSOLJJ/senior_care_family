@@ -2,6 +2,7 @@ package com.seniorcare.family
 
 import android.content.Intent
 import android.os.Bundle
+import android.provider.Settings
 import com.navercorp.nid.NaverIdLoginSDK
 import com.navercorp.nid.oauth.NidOAuthLogin
 import com.navercorp.nid.oauth.OAuthLoginCallback
@@ -12,6 +13,7 @@ import kotlinx.coroutines.*
 
 class MainActivity : FlutterFragmentActivity() {
     private val CHANNEL = "com.seniorcare.family/naver_login"
+    private val DEVICE_CHANNEL = "com.seniorcare.family/device"
     private val scope = CoroutineScope(Dispatchers.Main + SupervisorJob())
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -30,6 +32,17 @@ class MainActivity : FlutterFragmentActivity() {
                 "logOut" -> {
                     NaverIdLoginSDK.logout()
                     result.success(null)
+                }
+                else -> result.notImplemented()
+            }
+        }
+
+        // Device info channel (ANDROID_ID)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
+            when (call.method) {
+                "getAndroidId" -> {
+                    val androidId = Settings.Secure.getString(contentResolver, Settings.Secure.ANDROID_ID)
+                    result.success(androidId)
                 }
                 else -> result.notImplemented()
             }

@@ -2,8 +2,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
-import 'config/app_config.dart';
 import 'services/family_service.dart';
+import 'services/pairing_helper.dart';
 import 'screens/login_screen.dart';
 import 'screens/pairing_screen.dart';
 import 'screens/device_list_screen.dart';
@@ -27,11 +27,8 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
   }
 
   Future<void> _initServices() async {
-    try {
-      await AppConfig.registerDevice().timeout(const Duration(seconds: 10));
-    } catch (e) {
-      print('기기 등록 실패/타임아웃: $e');
-    }
+    // Family 기기는 /devices/에 등록하지 않음
+    // 사용자 정보는 /users/{uid}에서 관리
   }
 
   @override
@@ -80,6 +77,7 @@ class _PairingGateState extends State<_PairingGate> {
   List<String>? _familyIds;
   bool _loading = true;
   final List<StreamSubscription<DatabaseEvent>> _membershipSubs = [];
+  String? _pendingFamilyId; // 이름 설정 대기 중인 familyId
 
   @override
   void initState() {
@@ -104,6 +102,15 @@ class _PairingGateState extends State<_PairingGate> {
         // 모든 가족 그룹의 멤버십 실시간 감시
         for (final id in ids) {
           _watchMembership(id);
+        }
+        // 페어링 직후 이름 설정 다이얼로그
+        if (_pendingFamilyId != null) {
+          final fid = _pendingFamilyId!;
+          _pendingFamilyId = null;
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            if (!mounted) return;
+            await PairingHelper.onPairingComplete(context, fid);
+          });
         }
       }
     } catch (e) {
@@ -143,48 +150,6 @@ class _PairingGateState extends State<_PairingGate> {
     _membershipSubs.add(sub);
   }
 
-  Future<void> _promptFamilyName(String familyId) async {
-    final controller = TextEditingController();
-    final name = await showDialog<String>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('가족 이름 지정', style: TextStyle(color: Colors.white)),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
-            hintText: '예: 부모님, 장인어른',
-            hintStyle: TextStyle(color: Colors.grey[600]),
-            filled: true,
-            fillColor: Colors.grey[800],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
-          ),
-          onSubmitted: (v) => Navigator.pop(context, v.trim()),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('건너뛰기'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text.trim()),
-            child: const Text('저장'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
-    if (name != null && name.isNotEmpty) {
-      await _familyService.setFamilyName(familyId, name);
-    }
-  }
-
   @override
   void dispose() {
     for (final sub in _membershipSubs) {
@@ -206,7 +171,7 @@ class _PairingGateState extends State<_PairingGate> {
     if (_familyIds == null || _familyIds!.isEmpty) {
       return PairingScreen(
         onPairedWithId: (familyId) async {
-          await _promptFamilyName(familyId);
+          _pendingFamilyId = familyId;
           _checkPairing();
         },
       );

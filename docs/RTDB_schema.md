@@ -1,142 +1,275 @@
-# Firebase 데이터 스키마
+# Firebase 데이터 스키마 v3
 
 ## RTDB
 
 **URL**: `https://dcom-smart-frame-default-rtdb.firebaseio.com`
 
-```
+### 핵심 원칙
+
+- **비정규화 금지**: 같은 데이터를 두 곳에 쓰지 않음
+- `/devices/{did}` — Senior 기기의 모든 정보 (유일한 출처)
+- `/families/{fid}/devices/{did}: true` — 소속 목록만 (상세 정보 없음)
+- `/users/{uid}` — Family 사용자 정보 (기기 등록 안 함)
+- **onDisconnect는 `/devices/` 에만** — `/families/` 경로에 onDisconnect 없음 → 고아 부활 불가능
+
+### deviceId 생성 규칙
+
+| 플랫폼 | 소스 | 설명 |
+| --- | --- | --- |
+| Android (Senior) | `Settings.Secure.ANDROID_ID` | 기기별 고유 16자 hex, Factory Reset 시 변경 |
+| Family 앱 | 없음 | `/devices/`에 등록하지 않음. `/users/{uid}`로만 식별 |
+
+### `_label` 규칙
+
+- 모든 비-리프 노드에 `_label` 필드 추가
+- `_`가 알파벳 순 최상위 → Firebase Console에서 노드 열면 첫 번째로 보임
+- 각 앱이 노드 생성/수정 시 함께 업데이트
+
+---
+
+```text
 Firebase RTDB
 │
-├── /devices/{deviceId}/                     # 기기 등록 (Senior + Family 공용)
-│   ├── online: boolean                      # onDisconnect → false
-│   ├── model: string
-│   ├── name: string
-│   ├── lastSeen: timestamp                  # onDisconnect → ServerValue.timestamp
-│   ├── familyId: string                     # (Senior가 설정)
-│   └── fcmToken: string                     # (FCM 토큰)
+├── /devices/{deviceId}/                        # Senior 기기 전용 레지스트리
+│   ├── _label: string                          # "SM-T500 (senior) [online]"
+│   ├── role: "senior"                          # 항상 senior (Family는 등록 안 함)
+│   ├── model: string                           # "SM-T500"
+│   ├── name: string                            # 표시 이름 (기본값 = model)
+│   ├── online: boolean                         # onDisconnect → false
+│   ├── lastSeen: timestamp                     # onDisconnect → ServerValue.TIMESTAMP
+│   ├── familyId: string | null                 # 소속 가족 (페어링 시 설정)
+│   ├── fcmToken: string                        # FCM 푸시 토큰
+│   ├── appVersion: string                      # "1.0"
+│   ├── createdAt: timestamp                    # 최초 등록 시각
+│   ├── storageTotal: number                    # 전체 용량 (bytes)
+│   ├── storageAvailable: number                # 가용 용량 (bytes)
+│   ├── photoCount: number                      # 저장된 사진 수
+│   └── storageUpdatedAt: timestamp             # 스토리지 정보 갱신 시각
 │
-├── /calls/{callId}/                         # 영상통화 시그널링
-│   ├── offer: { sdp, type }
-│   ├── answer: { sdp, type }
-│   ├── targetDeviceId: string
-│   ├── callerUid: string                    # 발신자 userId
-│   ├── callerName: string                   # 발신자 이름
+│   Writer: Senior 앱만
+│   Reader: Family 앱 (기기 상세 정보), Cloud Functions
+│   onDisconnect: online → false, lastSeen → timestamp
+│
+├── /calls/{callId}/                            # 영상통화 시그널링 (임시, 통화 종료 후 삭제)
+│   ├── _label: string                          # "홍길동 → SM-T500 (call) ringing"
+│   ├── callerUid: string                       # 발신자 Firebase Auth UID
+│   ├── callerName: string                      # 발신자 표시 이름
+│   ├── callerDeviceId: string                  # 발신 기기 ID
+│   ├── targetDeviceId: string                  # 수신 기기 ID (Senior)
+│   ├── targetFamilyId: string                  # 수신 가족 ID (Security Rules용)
+│   ├── callType: "call" | "monitor"            # call=양방향, monitor=일방향 CCTV
+│   ├── status: "ringing"|"connected"|"ended"   # 통화 상태
 │   ├── createdAt: timestamp
-│   ├── status: "ringing" | "connected" | "ended"
-│   ├── callerCandidates/                    # ICE candidates (발신자)
-│   └── calleeCandidates/                    # ICE candidates (수신자)
+│   ├── offer: { sdp: string, type: string }    # SDP offer (Family → Senior)
+│   ├── answer: { sdp: string, type: string }   # SDP answer (Senior → Family)
+│   ├── callerCandidates/
+│   │   └── {pushId}: { candidate, sdpMid, sdpMLineIndex }
+│   ├── calleeCandidates/
+│   │   └── {pushId}: { candidate, sdpMid, sdpMLineIndex }
+│   ├── upgradeRequest: "call" | null           # 모니터링 → 통화 전환 요청
+│   ├── renegotiateOffer: { sdp, type } | null
+│   └── renegotiateAnswer: { sdp, type } | null
 │
-├── /pairingCodes/{code}: familyId           # 시니어 기기 페어링 코드 역조회
+│   Writer: Family (offer), Senior (answer)
+│   정리: 통화 종료 후 Senior가 2초 뒤 삭제
 │
-├── /families/{familyId}/
-│   ├── pairingCode: string                  # 시니어 기기 페어링 코드
-│   ├── createdAt: timestamp
-│   │
-│   ├── devices/
-│   │   └── {deviceId}/
-│   │       ├── name: string                 # 기기 이름
-│   │       ├── model: string                # "SM-T500"
-│   │       ├── addedAt: timestamp
-│   │       ├── lastSeen: timestamp
-│   │       └── online: boolean
-│   │
-│   ├── members/
-│   │   └── {userId}/
-│   │       ├── name: string                 # "딸", "아들"
-│   │       ├── role: string                 # "family"
-│   │       └── joinedAt: timestamp
-│   │
-│   ├── photoSync/                           # 사진 전송 큐 (Family↔Senior)
-│   │   └── {photoId}/
-│   │       ├── fileName: string             # "{photoId}.jpg"
-│   │       ├── size: number                 # 압축 후 바이트
-│   │       ├── checksum: string             # MD5 해시
-│   │       ├── storageUrl: string           # Storage 다운로드 URL
-│   │       ├── storagePath: string          # Storage 경로 (Family가 정리 후 삭제됨)
-│   │       ├── uploadedBy: string           # userId
-│   │       ├── uploadedByName: string       # "딸"
-│   │       ├── createdAt: timestamp
-│   │       ├── status: string               # "pending"|"downloading"|"done"|"expired"|"deleted"
-│   │       ├── retryCount: number           # 실패 시 증가 (max 3)
-│   │       └── thumbnail: string            # base64 (100×100px, ~2KB)
-│   │
-│   ├── reminders/                           # (미구현)
-│   │   └── {reminderId}/
-│   │       ├── type: "medication" | "custom"
-│   │       ├── title: string
-│   │       ├── message: string
-│   │       ├── mediaUrl: string             # 가족이 녹화한 영상/음성
-│   │       ├── schedule: { time, repeat, days }
-│   │       ├── enabled: boolean
-│   │       ├── createdBy: userId
-│   │       └── createdByName: string
-│   │
-│   ├── reminderLogs/                        # (미구현)
-│   │   └── {logId}/
-│   │       ├── reminderId: string
-│   │       ├── scheduledAt: timestamp
-│   │       ├── status: "confirmed" | "missed" | "pending"
-│   │       ├── detectedAt: timestamp | null
-│   │       └── notifiedAt: timestamp | null
-│   │
-│   └── callHistory/                         # (미구현)
-│       └── {callId}/
-│           ├── callerId: string
-│           ├── callerName: string
-│           ├── targetDeviceId: string
-│           ├── startedAt: timestamp
-│           ├── endedAt: timestamp
-│           ├── duration: number (seconds)
-│           └── status: "completed" | "missed" | "no_answer"
+├── /pairingCodes/{code}: familyId              # 페어링 코드 → 가족 ID 역조회
 │
-├── /users/{userId}/                         # Family 앱 사용자
-│   ├── name: string
-│   ├── email: string
-│   ├── photoUrl: string
-│   ├── provider: "google" | "apple" | "kakao" | "naver"
-│   └── familyIds/
-│       └── {familyId}: true
+│   Writer: Senior (페어링 시작 시)
+│   Reader: Family (페어링 참여 시)
 │
-└── /fcmTokens/{deviceId}: string            # FCM 토큰
+├── /users/{userId}/                            # Family 앱 사용자 프로필
+│   ├── _label: string                          # "홍길동 (kakao:487707844)"
+│   ├── name: string                            # 표시 이름
+│   ├── email: string                           # 이메일
+│   ├── photoUrl: string                        # 프로필 사진 URL
+│   ├── provider: "google"|"apple"|"kakao"|"naver"
+│   ├── createdAt: timestamp                    # 최초 가입 시각
+│   ├── lastLoginAt: timestamp                  # 최근 로그인 시각
+│   ├── familyIds/
+│   │   └── {familyId}: true                    # 소속 가족 목록
+│   └── familyNames/
+│       └── {familyId}: string                  # 가족별 별칭 ("부모님")
+│
+│   Writer: Family 앱 (자기 프로필만)
+│   Reader: Family 앱
+│   ※ Family 기기는 /devices/에 등록하지 않음
+│
+└── /families/{familyId}/                       # 가족 그룹
+    ├── _label: string                          # "부모님" (사용자 지정 이름)
+    ├── pairingCode: string                     # 현재 활성 페어링 코드 (6자리)
+    ├── createdAt: timestamp
+    │
+    ├── callStatus/                             # 실시간 통화 상태 (UI 인디케이터용)
+    │   ├── active: boolean
+    │   ├── type: "call" | "monitor"
+    │   ├── callerName: string
+    │   ├── callerUid: string
+    │   ├── callId: string
+    │   └── startedAt: timestamp
+    │
+    │   Writer: Senior
+    │   Reader: Family
+    │
+    ├── devices/
+    │   └── {deviceId}: true                    # 소속 기기 목록 (상세 정보 없음!)
+    │                                           # 상세 정보는 /devices/{deviceId}에서 읽기
+    │   Writer: Senior (페어링 시)
+    │   Reader: Family (deviceId 목록 조회 → /devices/{did}에서 상세)
+    │
+    ├── members/
+    │   └── {userId}/
+    │       ├── _label: string                  # "홍길동 (kakao:487707844)"
+    │       ├── name: string                    # 표시 이름 (사용자 지정)
+    │       ├── role: "family"
+    │       ├── provider: "google"|"apple"|"kakao"|"naver"
+    │       ├── photoUrl: string
+    │       └── joinedAt: timestamp
+    │
+    │   Writer: Family 앱 (joinFamily 시)
+    │   Reader: Family 앱, Senior (멤버 수 감지)
+    │
+    ├── photoSync/
+    │   └── {photoId}/
+    │       ├── _label: string                  # "photo_abc.jpg (pending, 홍길동)"
+    │       ├── fileName: string
+    │       ├── size: number
+    │       ├── checksum: string
+    │       ├── storageUrl: string
+    │       ├── storagePath: string | null
+    │       ├── uploadedBy: string
+    │       ├── uploadedByName: string
+    │       ├── createdAt: timestamp
+    │       ├── status: string                  # "pending"|"downloading"|"done"|"expired"|"deleted"
+    │       ├── retryCount: number
+    │       └── thumbnail: string               # base64 JPEG
+    │
+    │   Writer: Family (업로드), Senior (상태 변경), Cloud Function (만료)
+    │
+    ├── reminders/
+    │   └── {reminderId}/
+    │       ├── _label: string                  # "혈압약 08:00 매일 [ON]"
+    │       ├── title: string
+    │       ├── mediaUrl: string
+    │       ├── mediaType: "video" | "audio"
+    │       ├── mediaDuration: number
+    │       ├── schedule/
+    │       │   ├── time: string                # "HH:mm"
+    │       │   ├── repeat: "daily"|"weekdays"|"weekend"|"custom"|"test_5min"
+    │       │   └── days: [number]              # custom일 때만
+    │       ├── enabled: boolean
+    │       ├── createdBy: string
+    │       ├── createdByName: string
+    │       ├── targetDeviceId: string | null   # 대상 Senior (null=전체, 2차 구현)
+    │       ├── targetDeviceName: string | null
+    │       ├── createdAt: timestamp
+    │       └── updatedAt: timestamp
+    │
+    │   Writer: Family (CRUD)
+    │   Reader: Senior (스케줄링 + 미디어 다운로드)
+    │
+    ├── reminderLogs/                           # 스키마만 확정, 구현은 2차
+    │   └── {logId}/
+    │       ├── _label: string
+    │       ├── reminderId: string
+    │       ├── reminderTitle: string
+    │       ├── scheduledAt: timestamp
+    │       ├── triggeredAt: timestamp
+    │       ├── status: "pending"|"confirmed"|"missed"
+    │       ├── confirmedAt: timestamp | null
+    │       ├── missedAt: timestamp | null
+    │       ├── notifiedFamilyAt: timestamp | null
+    │       └── detectionMethod: "face"|"manual"|null
+    │
+    │   Writer: Senior
+    │   Reader: Family
+    │   보존: 90일 (Cloud Function)
+    │
+    └── callHistory/                            # 스키마만 확정, 구현은 2차
+        └── {historyId}/
+            ├── _label: string
+            ├── callId: string
+            ├── callerUid: string
+            ├── callerName: string
+            ├── targetDeviceId: string
+            ├── targetDeviceName: string
+            ├── callType: "call" | "monitor"
+            ├── startedAt: timestamp
+            ├── endedAt: timestamp
+            ├── duration: number
+            ├── endReason: string
+            └── result: string
+
+        Writer: Senior, Family
+        Reader: Family
+        보존: 365일 (Cloud Function)
 ```
+
+---
 
 ## Firebase Storage
 
 **버킷**: `gs://dcom-smart-frame.firebasestorage.app`
 
-```
+```text
 families/
   {familyId}/
-    temp/                                    # 사진 임시 버퍼 (전송 완료 후 삭제)
-      {photoId}.jpg                          # Family 업로드 → Senior 다운로드 → Family 삭제
-    reminders/                               # (미구현)
+    temp/                                       # 사진 임시 버퍼
+      {photoId}.jpg
+    reminders/
       {reminderId}/
-        media.mp4                            # 복약 알림 영상
+        media.mp4                               # 영상 알림 미디어
 ```
-
-### Storage Rules
-
-- `families/{familyId}/temp/{fileName}`
-  - **read**: 누구나 (Senior는 Firebase Auth 없음)
-  - **write**: 인증된 사용자만 (`request.auth != null`)
-- **삭제 주체**: Family 앱 — Senior가 `status: done` 설정 후, Family가 감지하여 Storage 임시 파일 삭제
-- **미수신 파일**: Cloud Function (`cleanupExpiredPhotos`)이 6시간마다 정리
 
 ### 만료 정책
 
-| 조건 | 경과 시간 | 처리 |
-|------|-----------|------|
-| `status: "pending"` | 7일 | Storage 삭제 + `status: "expired"` + `storagePath` 제거 |
-| `status: "expired"` | 37일 (만료 후 30일) | RTDB 항목 자체 삭제 (썸네일 포함) |
+| 대상 | 조건 | 경과 시간 | 처리 |
+| --- | --- | --- | --- |
+| photoSync | `status: "pending"` | 7일 | Storage 삭제 + `status: "expired"` |
+| photoSync | `status: "expired"` | 37일 | RTDB 항목 삭제 |
+| reminderLogs | - | 90일 | RTDB 항목 삭제 |
+| callHistory | - | 365일 | RTDB 항목 삭제 |
 
-- **실행 주기**: 6시간마다 (Cloud Functions 스케줄)
-- **만료 기간 7일 근거**: 주말, 병원 입원, 충전 깜빡 등 현실적 시나리오 고려
-- **RTDB 30일 정리 근거**: 썸네일(base64) 무한 축적 방지
-- **Family UI**: `expired` 항목은 `deleted`와 동일하게 목록에서 숨김
+---
+
+## Cloud Functions 와치독 (cleanupOrphanedData)
+
+매일 새벽 3시 (KST) 실행. 수동: `cleanupOrphanedDataManual` HTTP 호출.
+
+```text
+Step 1: 유령 디바이스 정리
+  /devices/ → offline + lastSeen 7일 경과 → 삭제
+  → 해당 /families/{fid}/devices/{did}도 삭제
+
+Step 2: 가족 내 유령 디바이스 정리
+  /families/{fid}/devices/{did} → /devices/{did} 없거나 familyId 불일치 → 삭제
+
+Step 3: 고아 가족 정리
+  /families/{fid} → members 0명 + devices 0명 → 삭제 (pairingCode도)
+
+Step 4: 고아 페어링 코드 정리
+  /pairingCodes/{code} → familyId가 /families/에 없음 → 삭제
+
+Step 5: 고아 유저 참조 정리
+  /users/{uid}/familyIds/{fid} → familyId가 /families/에 없음 → familyIds + familyNames 삭제
+```
+
+---
+
+## v2 → v3 변경 요약
+
+| 변경 | 내용 |
+| --- | --- |
+| `/families/{fid}/devices/{did}` | 상세 정보 제거 → `true` (목록 플래그만) |
+| `/devices/{did}` | storageTotal/Available/photoCount 이동 (기존 families에서) |
+| onDisconnect | `/families/` 경로에서 완전 제거 → `/devices/`에만 |
+| Family 기기 등록 | `/devices/`에 등록하지 않음 → `/users/{uid}`로만 관리 |
+| `registerDevice()` | Family `app_config.dart`에서 삭제 |
+| Senior `onCreate()` | RTDB familyId 검증 추가 (고아 방지) |
 
 ### 사진 전송 라이프사이클
 
-```
+```text
 Family 업로드     → storagePath 생성, status: "pending"
 Senior 수신 시작  → status: "downloading"
 Senior 저장 완료  → status: "done"
