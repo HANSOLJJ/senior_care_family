@@ -53,32 +53,58 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
     if (mounted) setState(() => _familyNames = names);
   }
 
+  // familyId → 해당 가족의 각 기기 online 감시 구독 목록
+  final Map<String, List<StreamSubscription>> _deviceOnlineSubs = {};
+
   void _watchAllDevices() {
     for (final familyId in widget.familyIds) {
+      // 1) /families/{fid}/devices/ 목록 감시 (기기 추가/삭제 감지)
       final sub = FirebaseDatabase.instance
           .ref('families/$familyId/devices')
           .onValue
-          .listen((event) async {
+          .listen((event) {
         final data = event.snapshot.value;
-        bool hasOnline = false;
+        // 기존 기기 online 구독 해제
+        for (final s in _deviceOnlineSubs[familyId] ?? []) {
+          s.cancel();
+        }
+        _deviceOnlineSubs[familyId] = [];
+
         if (data != null && data is Map) {
-          // deviceId 목록에서 각 /devices/{did}/online 확인
+          // 2) 각 /devices/{did}/online 실시간 감시
           for (final deviceId in data.keys) {
-            final snap = await FirebaseDatabase.instance.ref('devices/$deviceId/online').get();
-            if (snap.value == true) {
-              hasOnline = true;
-              break;
-            }
+            final onlineSub = FirebaseDatabase.instance
+                .ref('devices/$deviceId/online')
+                .onValue
+                .listen((onlineEvent) {
+              _updateOnlineStatus(familyId);
+            });
+            _deviceOnlineSubs[familyId]!.add(onlineSub);
           }
         }
-        if (mounted) {
-          setState(() {
-            _onlineStatus[familyId] = hasOnline;
-            _loading = false;
-          });
-        }
+        // 초기 로딩 완료
+        if (mounted) setState(() => _loading = false);
       });
       _subs.add(sub);
+    }
+  }
+
+  Future<void> _updateOnlineStatus(String familyId) async {
+    final devicesSnap = await FirebaseDatabase.instance
+        .ref('families/$familyId/devices').get();
+    final data = devicesSnap.value;
+    bool hasOnline = false;
+    if (data != null && data is Map) {
+      for (final deviceId in data.keys) {
+        final snap = await FirebaseDatabase.instance.ref('devices/$deviceId/online').get();
+        if (snap.value == true) {
+          hasOnline = true;
+          break;
+        }
+      }
+    }
+    if (mounted) {
+      setState(() => _onlineStatus[familyId] = hasOnline);
     }
   }
 
@@ -123,6 +149,11 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   void dispose() {
     for (final sub in _subs) {
       sub.cancel();
+    }
+    for (final subs in _deviceOnlineSubs.values) {
+      for (final s in subs) {
+        s.cancel();
+      }
     }
     super.dispose();
   }

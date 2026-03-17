@@ -96,6 +96,23 @@ flutter build apk --release
 adb -s <serial> install -r build/app/outputs/flutter-apk/app-release.apk
 ```
 
+## Cloud Functions
+
+```bash
+cd functions
+npm install              # 최초 1회
+firebase deploy --only functions
+```
+
+- Firebase 서버에서 실행되는 Node.js 함수 (앱과 독립)
+- 서비스 계정 키: `functions/dcom-smart-frame-firebase-adminsdk-fbsvc-592311d9ff.json`
+  - **절대 git에 올리면 안 됨** (.gitignore 처리됨)
+  - 로컬에서 Admin SDK 사용 시 필요
+- 수동 테스트: 브라우저에서 URL 호출
+  - `https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupOrphanedDataManual`
+  - `https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupExpiredPhotosManual`
+- Firebase Console → 호스팅, 서버리스 → Functions 에서 로그/상태 확인
+
 ## 주요 문서
 
 - `docs/project-structure.md` — 프로젝트 구조 + RTDB 스키마 + 화면 흐름

@@ -254,6 +254,7 @@ const DEVICE_OFFLINE_DAYS = 7;
  * Step 3: 고아 가족 정리 (멤버 0 + 디바이스 0)
  * Step 4: 고아 페어링 코드 정리
  * Step 5: 고아 유저 참조 정리
+ * Step 6: 고아 Storage 정리 (RTDB에 없는 familyId의 Storage 파일)
  */
 async function doOrphanCleanup() {
   const db = admin.database();
@@ -351,6 +352,33 @@ async function doOrphanCleanup() {
     }
   }
 
+  // Step 6: 고아 Storage 정리 (RTDB에 없는 familyId의 Storage 파일 삭제)
+  try {
+    const bucket = admin.storage().bucket("dcom-smart-frame.firebasestorage.app");
+    const [files] = await bucket.getFiles({ prefix: "families/" });
+    const checkedFamilies = new Set();
+    for (const file of files) {
+      // families/{fid}/... 에서 fid 추출
+      const parts = file.name.split("/");
+      if (parts.length < 2) continue;
+      const fid = parts[1];
+      if (checkedFamilies.has(fid)) continue;
+      checkedFamilies.add(fid);
+
+      if (!families[fid]) {
+        // RTDB에 없는 family → 해당 family의 Storage 파일 전부 삭제
+        const [familyFiles] = await bucket.getFiles({ prefix: `families/${fid}/` });
+        for (const f of familyFiles) {
+          await f.delete();
+          result.storageFiles = (result.storageFiles || 0) + 1;
+        }
+        console.log(`Step6: 고아 Storage 삭제: families/${fid}/ (${familyFiles.length}개 파일)`);
+      }
+    }
+  } catch (e) {
+    console.error("Step6 Storage 정리 실패:", e.message);
+  }
+
   return result;
 }
 
@@ -363,7 +391,7 @@ exports.cleanupOrphanedData = functions.pubsub
   .timeZone("UTC")
   .onRun(async () => {
     const result = await doOrphanCleanup();
-    console.log(`고아 정리 완료: 디바이스=${result.devices}, 가족디바이스=${result.familyDevices}, 가족=${result.families}, 코드=${result.pairingCodes}, 유저참조=${result.userRefs}`);
+    console.log(`고아 정리 완료: 디바이스=${result.devices}, 가족디바이스=${result.familyDevices}, 가족=${result.families}, 코드=${result.pairingCodes}, 유저참조=${result.userRefs}, Storage=${result.storageFiles || 0}`);
     return null;
   });
 

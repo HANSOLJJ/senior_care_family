@@ -23,7 +23,10 @@ class PhotoTransferService {
 
     final profile = AppConfig.targetDevice;
     final photoId = _db.ref().push().key!;
-    final fileName = '$photoId.jpg';
+    final creatorName = (user.displayName ?? '가족').replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
+    final now = DateTime.now();
+    final dateTimeStr = '${now.toString().substring(0, 10).replaceAll('-', '')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
+    final fileName = 'photo_${creatorName}_$dateTimeStr.jpg';
 
     // 1. 리사이즈 + JPEG 압축
     print('사진 압축 시작: maxRes=${profile.maxResolution}, quality=${profile.jpegQuality}');

@@ -65,41 +65,63 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
     _loadMembers();
   }
 
+  List<String> _deviceIds = [];
+  final List<StreamSubscription> _deviceDetailSubs = [];
+
   void _watchDevices() {
     // /families/{fid}/devices/ → deviceId 목록 (값은 true)
-    final sub = _db.ref('families/${widget.familyId}/devices').onValue.listen((event) async {
+    final sub = _db.ref('families/${widget.familyId}/devices').onValue.listen((event) {
       final data = event.snapshot.value;
+      // 기존 기기 상세 구독 해제
+      for (final s in _deviceDetailSubs) {
+        s.cancel();
+      }
+      _deviceDetailSubs.clear();
+
       if (data == null) {
+        _deviceIds = [];
         if (mounted) setState(() { _devices = []; _loading = false; });
         return;
       }
 
       // deviceId 목록 추출
-      final deviceIds = <String>[];
+      _deviceIds = <String>[];
       if (data is Map) {
-        deviceIds.addAll(data.keys.cast<String>());
+        _deviceIds = data.keys.cast<String>().toList();
       }
 
-      // 각 /devices/{did}에서 상세 정보 읽기
-      final list = <Map<String, dynamic>>[];
-      for (final id in deviceIds) {
-        final snap = await _db.ref('devices/$id').get();
-        if (!snap.exists) continue;
-        final info = Map<String, dynamic>.from(snap.value as Map);
-        info['id'] = id;
-        list.add(info);
+      // 각 /devices/{did} 실시간 감시
+      for (final id in _deviceIds) {
+        final detailSub = _db.ref('devices/$id').onValue.listen((_) {
+          _refreshDeviceList();
+        });
+        _deviceDetailSubs.add(detailSub);
       }
 
-      // 온라인 기기 우선
-      list.sort((a, b) {
-        final aOn = a['online'] == true ? 0 : 1;
-        final bOn = b['online'] == true ? 0 : 1;
-        return aOn.compareTo(bOn);
-      });
-
-      if (mounted) setState(() { _devices = list; _loading = false; });
+      // 초기 로드
+      _refreshDeviceList();
     });
     _subs.add(sub);
+  }
+
+  Future<void> _refreshDeviceList() async {
+    final list = <Map<String, dynamic>>[];
+    for (final id in _deviceIds) {
+      final snap = await _db.ref('devices/$id').get();
+      if (!snap.exists) continue;
+      final info = Map<String, dynamic>.from(snap.value as Map);
+      info['id'] = id;
+      list.add(info);
+    }
+
+    // 온라인 기기 우선
+    list.sort((a, b) {
+      final aOn = a['online'] == true ? 0 : 1;
+      final bOn = b['online'] == true ? 0 : 1;
+      return aOn.compareTo(bOn);
+    });
+
+    if (mounted) setState(() { _devices = list; _loading = false; });
   }
 
   void _watchCallStatus() {
@@ -238,6 +260,9 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   void dispose() {
     for (final sub in _subs) {
       sub.cancel();
+    }
+    for (final s in _deviceDetailSubs) {
+      s.cancel();
     }
     super.dispose();
   }

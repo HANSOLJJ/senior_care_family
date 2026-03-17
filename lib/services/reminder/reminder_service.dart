@@ -99,7 +99,12 @@ class ReminderService {
 
     // 1. Storage 업로드
     final ext = mediaType == 'video' ? 'mp4' : 'm4a';
-    final storagePath = 'families/$familyId/reminders/$reminderId/media.$ext';
+    final creatorName = _auth.currentUser?.displayName ?? '가족';
+    final dateStr = DateTime.now().toString().substring(0, 10).replaceAll('-', '');
+    final safeTitle = title.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
+    final safeName = creatorName.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
+    final fileName = '${safeTitle}_${safeName}_$dateStr.$ext';
+    final storagePath = 'families/$familyId/reminders/$reminderId/$fileName';
     final ref = _storage.ref(storagePath);
 
     final bytes = await mediaFile.readAsBytes();
@@ -184,18 +189,26 @@ class ReminderService {
 
     // 미디어 변경
     if (mediaFile != null && mediaType != null) {
-      // 기존 파일 삭제
+      // 기존 파일 전체 삭제 (파일명이 바뀔 수 있으므로 폴더 내 전부)
       try {
-        final oldExt = mediaType == 'video' ? 'mp4' : 'm4a';
-        await _storage
-            .ref('families/$familyId/reminders/$reminderId/media.$oldExt')
-            .delete();
+        final listResult = await _storage
+            .ref('families/$familyId/reminders/$reminderId')
+            .listAll();
+        for (final item in listResult.items) {
+          await item.delete();
+        }
       } catch (_) {}
 
       // 새 파일 업로드
       final ext = mediaType == 'video' ? 'mp4' : 'm4a';
+      final reminderTitle = title ?? updates['title'] as String? ?? 'reminder';
+      final creatorName = _auth.currentUser?.displayName ?? '가족';
+      final dateStr = DateTime.now().toString().substring(0, 10).replaceAll('-', '');
+      final safeTitle = reminderTitle.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
+      final safeName = creatorName.replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
+      final fileName = '${safeTitle}_${safeName}_$dateStr.$ext';
       final storagePath =
-          'families/$familyId/reminders/$reminderId/media.$ext';
+          'families/$familyId/reminders/$reminderId/$fileName';
       final ref = _storage.ref(storagePath);
       final bytes = await mediaFile.readAsBytes();
       final uploadTask = ref.putData(
