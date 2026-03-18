@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io' show Platform;
 import 'package:flutter/services.dart';
 import 'package:device_info_plus/device_info_plus.dart';
 
@@ -68,18 +69,22 @@ class AppConfig {
   /// 장치 정보 읽기
   static Future<void> initialize() async {
     final deviceInfo = DeviceInfoPlugin();
-    final android = await deviceInfo.androidInfo;
-    deviceModel = android.model;
 
-    // ANDROID_ID 가져오기 (Settings.Secure.ANDROID_ID, 기기별 고유)
-    try {
-      const channel = MethodChannel('com.seniorcare.family/device');
-      final androidId = await channel.invokeMethod<String>('getAndroidId');
-      deviceId = androidId ?? android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
-    } catch (e) {
-      // MethodChannel 실패 시 fallback
-      deviceId = android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
-      print('ANDROID_ID 가져오기 실패, fallback 사용: $e');
+    if (Platform.isAndroid) {
+      final android = await deviceInfo.androidInfo;
+      deviceModel = android.model;
+      try {
+        const channel = MethodChannel('com.seniorcare.family/device');
+        final androidId = await channel.invokeMethod<String>('getAndroidId');
+        deviceId = androidId ?? android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
+      } catch (e) {
+        deviceId = android.id.replaceAll(RegExp(r'[.#$\[\]]'), '_');
+        print('ANDROID_ID 가져오기 실패, fallback 사용: $e');
+      }
+    } else if (Platform.isIOS) {
+      final ios = await deviceInfo.iosInfo;
+      deviceModel = ios.model;
+      deviceId = ios.identifierForVendor ?? 'unknown';
     }
     print('AppConfig: model=$deviceModel, id=$deviceId');
   }
