@@ -120,7 +120,7 @@ tail -f ~/projects/Family/tmp/flutter.log
 - Xcode 26.3, Flutter 3.41.4, CocoaPods 1.16.2
 - iOS Podfile: `platform :ios, '15.0'`
 - Apple Developer: 개인 계정 (roxm1234@naver.com), Team ID: 85UGG849SL
-- Bundle ID: `com.seniorcare.family.dev` (무료 개인 팀 — 7일 서명 만료)
+- Bundle ID: `com.seniorcare.family` (Android와 동일, 무료 개인 팀 — 7일 서명 만료)
 - **코드 수정은 반드시 Windows에서** → push → Mac Mini에서 pull (충돌 방지)
 - **Mac Mini에서 코드 수정 금지** (git 충돌 원인)
 - iOS 테스트 기기: **Sol** (iPhone, `00008110-000C48390ADA801E`)

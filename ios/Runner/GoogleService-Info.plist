@@ -3,9 +3,9 @@
 <plist version="1.0">
 <dict>
 	<key>CLIENT_ID</key>
-	<string>632083959171-3lhc4c32jbs8efo2kok3mc2uoiv1q8ft.apps.googleusercontent.com</string>
+	<string>632083959171-rpkkthmp10f37ups2nmk6u8htpcpmf8d.apps.googleusercontent.com</string>
 	<key>REVERSED_CLIENT_ID</key>
-	<string>com.googleusercontent.apps.632083959171-3lhc4c32jbs8efo2kok3mc2uoiv1q8ft</string>
+	<string>com.googleusercontent.apps.632083959171-rpkkthmp10f37ups2nmk6u8htpcpmf8d</string>
 	<key>ANDROID_CLIENT_ID</key>
 	<string>632083959171-ape8hdc0b39v8bqnnu52da5pa7s0e4nm.apps.googleusercontent.com</string>
 	<key>API_KEY</key>
@@ -15,7 +15,7 @@
 	<key>PLIST_VERSION</key>
 	<string>1</string>
 	<key>BUNDLE_ID</key>
-	<string>com.seniorcare.family.dev</string>
+	<string>com.seniorcare.family</string>
 	<key>PROJECT_ID</key>
 	<string>dcom-smart-frame</string>
 	<key>STORAGE_BUCKET</key>
@@ -31,7 +31,7 @@
 	<key>IS_SIGNIN_ENABLED</key>
 	<true></true>
 	<key>GOOGLE_APP_ID</key>
-	<string>1:632083959171:ios:a92c588b5bf676f58e7ab6</string>
+	<string>1:632083959171:ios:9f1d6af960b54f768e7ab6</string>
 	<key>DATABASE_URL</key>
 	<string>https://dcom-smart-frame-default-rtdb.firebaseio.com</string>
 </dict>
