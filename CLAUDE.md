@@ -177,3 +177,7 @@ firebase deploy --only functions
 - RTDB 비정규화 제거: `/families/{fid}/devices/{did}: true`만, 상세는 `/devices/`에서
 - Storage 삭제: Cloud Function RTDB 트리거로 일원화 (앱에서 직접 삭제 안 함)
 - 개발 환경: Windows(Android) + Mac Mini(iOS), 코드 수정은 Windows에서만
+
+## Git 커밋 규칙
+
+- `Co-Authored-By: Claude` 등 co-author 태그 커밋 메시지에 **절대 포함하지 말 것**
