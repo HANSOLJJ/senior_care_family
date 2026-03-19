@@ -442,6 +442,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
 
   Widget _buildActionButtons() {
     final canCall = _isOnline && !_isInCall;
+    final canMonitor = _isOnline; // 통화 중에도 모니터링 가능 (1:N)
     final callLabel = _isInCall ? '통화 중' : '영상통화';
 
     return Wrap(
@@ -457,8 +458,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
         _actionButton(
           icon: Icons.camera_outdoor,
           label: '모니터링',
-          color: canCall ? Colors.orange : Colors.grey[700]!,
-          onTap: canCall ? _monitorDevice : null,
+          color: canMonitor ? Colors.orange : Colors.grey[700]!,
+          onTap: canMonitor ? _monitorDevice : null,
         ),
         _actionButton(
           icon: Icons.photo_library,
