@@ -16,6 +16,7 @@ class SignalingService {
   final DatabaseReference _db = FirebaseDatabase.instance.ref();
   StreamSubscription? _callListener;
   String? _currentCallId;
+  String? _currentFamilyId;
 
   /// 새로운 통화 요청 감시 (수신측) — targetDeviceId 필터링
   void listenForIncomingCalls({
@@ -122,6 +123,20 @@ class SignalingService {
       'createdAt': ServerValue.timestamp,
     });
     _currentCallId = callId;
+    _currentFamilyId = targetFamilyId;
+
+    // families/{fid}/callStatus 기록 (통화 중 표시 — callType="call" 전용)
+    // 모니터링은 Senior MonitoringSession이 count-aware하게 관리하므로 Family에서 건드리지 않음
+    if (targetFamilyId != null && callType == 'call') {
+      await _db.child('families/$targetFamilyId/callStatus').set({
+        'active': true,
+        'type': callType,
+        'callId': callId,
+        'callerName': name,
+        'startedAt': ServerValue.timestamp,
+      });
+    }
+
     print('시그널링: ${callType == "monitor" ? "모니터링" : "통화"} 생성 callId=$callId → target=$targetDeviceId');
     return callId;
   }
@@ -153,6 +168,13 @@ class SignalingService {
     // onDisconnect 취소 (정상 종료이므로)
     await _db.child('calls/$callId').onDisconnect().cancel();
     await _db.child('calls/$callId/status').set('ended');
+
+    // families/{fid}/callStatus 초기화
+    if (_currentFamilyId != null) {
+      await _db.child('families/$_currentFamilyId/callStatus').update({'active': false});
+      _currentFamilyId = null;
+    }
+
     print('시그널링: 통화 종료 callId=$callId');
   }
 

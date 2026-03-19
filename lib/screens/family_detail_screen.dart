@@ -6,7 +6,7 @@ import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
 import '../services/photo_transfer_service.dart';
-import 'outgoing_call_screen.dart';
+// outgoing_call_screen은 MonitoringScreen(callType:"call")으로 통합됨
 import 'photo_upload_screen.dart';
 import 'monitoring_screen.dart';
 import 'pairing_screen.dart';
@@ -176,9 +176,11 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
     if (device == null) return;
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => OutgoingCallScreen(
+        builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
           targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          callType: 'call',
+          familyId: widget.familyId,
         ),
       ),
     );
@@ -192,6 +194,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
         builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
           targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          callType: 'monitor',
+          familyId: widget.familyId,
         ),
       ),
     );

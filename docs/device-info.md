@@ -114,6 +114,45 @@ enableFaceDetection = true;
 - 최대 5초 타임아웃 (실패해도 앱 동작에 영향 없음)
 - 워밍업 실패 시 첫 통화만 느려질 뿐, 기능에는 문제 없음
 
+## 기기별 AEC (음향 에코 캔슬) 차이
+
+### 문제 현상
+A20에서 Family가 통화를 걸면, 벨소리가 울리는 동안 Family 앱에서 벨소리 에코가 들리는 문제.
+갤탭(T500)에서는 동일한 상황에서 에코 없음.
+
+### 원인: audio_effects 설정 차이
+
+**A20 (`/system/etc/audio_effects.conf`)**
+
+- AEC/NS 라이브러리 없음
+- `pre_processing` 섹션 전부 주석 처리 → 하드웨어 AEC 미적용
+- WebRTC 소프트웨어 AEC에만 의존 → 스피커→마이크 에코 제거 불충분
+
+**T500 (`/system/etc/audio_effects_model.xml`)**
+
+- Qualcomm `libqcomvoiceprocessing.so` 라이브러리 탑재
+- `voice_communication` 스트림에 AEC + NS 자동 적용
+- `MODE_IN_COMMUNICATION` 설정 시 하드웨어 AEC가 에코 완전 제거
+
+```xml
+<!-- T500만 존재하는 설정 -->
+<library name="audio_pre_processing" path="libqcomvoiceprocessing.so"/>
+<preprocess>
+  <stream type="voice_communication">
+    <apply effect="aec"/>
+    <apply effect="ns"/>
+  </stream>
+</preprocess>
+```
+
+### 해결책
+A20은 하드웨어 AEC가 없으므로, WebRTC 수준에서 수락 전 오디오 전송 차단.
+`MonitoringSession`의 `callType="call"` 피어에서 수락 전 `RtpSender`의 audio encoding을 비활성화,
+수락(`seniorAccepted`) 후 재활성화.
+공유 `localAudioTrack`을 건드리지 않아 동시 모니터링 중인 다른 연결에 영향 없음.
+
+---
+
 ## 빌드 모드별 성능 차이
 
 | | Debug | Release |

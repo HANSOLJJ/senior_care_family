@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../config/app_config.dart';
 import 'signaling_service.dart';
@@ -36,6 +37,7 @@ class WebRtcService {
   bool _isMonitoring = false;
   Timer? _disconnectTimer;
   Timer? _aecStatsTimer;
+  StreamSubscription? _seniorAcceptedSub;
 
   /// 상대방 끊김 감지 시 호출되는 콜백
   void Function()? onCallEnded;
@@ -465,14 +467,161 @@ class WebRtcService {
     return callId;
   }
 
+  /// 통화 발신 (모니터링 기반 — RecvOnly 시작 → Senior 수락 후 양방향 전환)
+  Future<String> startCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
+    _isHungUp = false;
+    _isMonitoring = true; // RecvOnly로 시작
+    print('WebRTC: 통화 발신 시작 → target=$targetDeviceId');
+
+    final pendingCandidates = <RTCIceCandidate>[];
+    String? resolvedCallId;
+
+    final pc = await createPeerConnection(_iceServers);
+    _peerConnection = pc;
+
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+    await pc.addTransceiver(
+      kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
+      init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
+    );
+
+    pc.onTrack = (RTCTrackEvent event) {
+      print('WebRTC: 통화 원격 트랙 수신 kind=${event.track.kind}');
+      if (event.streams.isNotEmpty) {
+        _remoteStream = event.streams[0];
+        remoteRenderer.srcObject = _remoteStream;
+      }
+    };
+
+    pc.onIceCandidate = (RTCIceCandidate candidate) {
+      if (resolvedCallId != null) {
+        _signaling.addCandidate(resolvedCallId, 'callerCandidates', {
+          'candidate': candidate.candidate,
+          'sdpMid': candidate.sdpMid,
+          'sdpMLineIndex': candidate.sdpMLineIndex,
+        });
+      } else {
+        pendingCandidates.add(candidate);
+      }
+    };
+
+    pc.onConnectionState = (RTCPeerConnectionState state) {
+      print('WebRTC: 통화 연결 상태 = $state');
+      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+        _disconnectTimer?.cancel();
+        _disconnectTimer = Timer(const Duration(seconds: 5), () {
+          final s = _peerConnection?.connectionState;
+          if (s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+              s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+            hangUp();
+            onCallEnded?.call();
+          }
+        });
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+        _disconnectTimer?.cancel();
+        hangUp();
+        onCallEnded?.call();
+      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        _disconnectTimer?.cancel();
+      }
+    };
+
+    final offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+
+    final callId = await _signaling.createCall(
+      {'sdp': offer.sdp, 'type': offer.type},
+      targetDeviceId: targetDeviceId,
+      callerUid: callerUid,
+      callerName: callerName,
+      callerDeviceId: AppConfig.deviceId,
+      targetFamilyId: familyId,
+      callType: 'call',
+    );
+    _callId = callId;
+    resolvedCallId = callId;
+
+    await _signaling.setCallCleanupOnDisconnect(callId);
+
+    for (final c in pendingCandidates) {
+      _signaling.addCandidate(callId, 'callerCandidates', {
+        'candidate': c.candidate,
+        'sdpMid': c.sdpMid,
+        'sdpMLineIndex': c.sdpMLineIndex,
+      });
+    }
+    pendingCandidates.clear();
+
+    _signaling.listenForAnswer(callId, (answer) async {
+      if (_peerConnection?.signalingState ==
+          RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
+        await _peerConnection?.setRemoteDescription(
+          RTCSessionDescription(answer['sdp'], answer['type']),
+        );
+      }
+    });
+
+    _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
+      _peerConnection?.addCandidate(RTCIceCandidate(
+        candidate['candidate'],
+        candidate['sdpMid'],
+        candidate['sdpMLineIndex'],
+      ));
+    });
+
+    _signaling.listenForCallEnd(callId, () {
+      hangUp();
+      onCallEnded?.call();
+    });
+
+    // 로컬 카메라 프리뷰 시작 (상대방에게 미전송)
+    await _startLocalPreviewOnly();
+
+    // Senior 수락 대기
+    _listenForSeniorAccepted(callId);
+
+    print('WebRTC: 통화 발신 완료, Senior 수락 대기 callId=$callId');
+    _startAecStats();
+    return callId;
+  }
+
+  /// 로컬 카메라 프리뷰만 ON (PeerConnection track 미추가 — 상대방에게 안 보임)
+  Future<void> _startLocalPreviewOnly() async {
+    try {
+      _localStream = await _getLocalStream();
+      localRenderer.srcObject = _localStream;
+      print('WebRTC: 로컬 프리뷰 시작 (미전송)');
+    } catch (e) {
+      print('WebRTC: 로컬 프리뷰 실패: $e');
+    }
+  }
+
+  /// Senior 수락 감지 → upgradeToCall() 자동 호출
+  void _listenForSeniorAccepted(String callId) {
+    _seniorAcceptedSub = FirebaseDatabase.instance
+        .ref('calls/$callId/seniorAccepted')
+        .onValue
+        .listen((event) {
+      if (event.snapshot.value == true && _callId == callId) {
+        print('WebRTC: Senior 수락 감지 → 양방향 전환');
+        upgradeToCall();
+      }
+    });
+  }
+
   /// 모니터링 → 통화 전환 (renegotiation)
   Future<void> upgradeToCall() async {
     if (_peerConnection == null || _callId == null) return;
     print('WebRTC: 모니터링 → 통화 전환');
 
-    // 로컬 미디어 획득
-    _localStream = await _getLocalStream();
-    localRenderer.srcObject = _localStream;
+    // 로컬 미디어 획득 (startCall에서 이미 프리뷰 시작했으면 재사용)
+    if (_localStream == null) {
+      _localStream = await _getLocalStream();
+      localRenderer.srcObject = _localStream;
+    }
 
     // 기존 transceiver를 sendrecv로 변경 + 로컬 트랙 추가
     final transceivers = await _peerConnection!.getTransceivers();
@@ -526,6 +675,8 @@ class WebRtcService {
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
     _stopAecStats();
+    await _seniorAcceptedSub?.cancel();
+    _seniorAcceptedSub = null;
     // 자기 hangUp 시 listenForCallEnd 콜백 방지
     onCallEnded = null;
     print('WebRTC: 통화 종료');

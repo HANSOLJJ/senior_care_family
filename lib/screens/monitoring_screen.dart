@@ -5,15 +5,22 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
 
-/// CCTV 모니터링 화면 — Senior 카메라 일방향 시청 + 통화 전환
+/// 모니터링 / 통화 통합 화면
+///
+/// callType="monitor": 무음 CCTV (Senior 인지 불가)
+/// callType="call": 벨소리 + 수락 대기 → 양방향 전환
 class MonitoringScreen extends StatefulWidget {
   final String targetDeviceId;
   final String targetDeviceName;
+  final String callType; // "monitor" | "call"
+  final String? familyId;
 
   const MonitoringScreen({
     super.key,
     required this.targetDeviceId,
     required this.targetDeviceName,
+    this.callType = 'monitor',
+    this.familyId,
   });
 
   @override
@@ -25,17 +32,24 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   late final WebRtcService _webrtc;
   bool _connected = false;
   bool _connecting = true;
-  bool _upgraded = false;
+  bool _upgraded = false;       // 양방향 전환 완료
+  bool _waitingAcceptance = false; // callType="call": 수락 대기 중
   Timer? _timeoutTimer;
   Timer? _connectionCheckTimer;
   Timer? _upgradeCheckTimer;
+
+  bool get _isCall => widget.callType == 'call';
 
   @override
   void initState() {
     super.initState();
     _webrtc = WebRtcService(_signaling);
     _webrtc.onCallEnded = _onRemoteEnd;
-    _startMonitoring();
+    if (_isCall) {
+      _startCall();
+    } else {
+      _startMonitoring();
+    }
   }
 
   Future<void> _startMonitoring() async {
@@ -46,33 +60,78 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         widget.targetDeviceId,
         callerUid: user?.uid,
         callerName: user?.displayName ?? '가족',
+        familyId: widget.familyId,
+      );
+      _waitForConnection();
+    } catch (e) {
+      _handleError(e);
+    }
+  }
+
+  Future<void> _startCall() async {
+    try {
+      await _webrtc.initialize();
+      final user = FirebaseAuth.instance.currentUser;
+      await _webrtc.startCall(
+        widget.targetDeviceId,
+        callerUid: user?.uid,
+        callerName: user?.displayName ?? '가족',
+        familyId: widget.familyId,
       );
 
-      // 30초 타임아웃
-      _timeoutTimer = Timer(const Duration(seconds: 30), () {
-        if (_connecting && !_connected && mounted) {
-          _hangUp();
-        }
-      });
-
-      // 연결 상태 주기적 확인
+      // 연결되면 수락 대기 UI 표시
       _connectionCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
         if (!mounted) { timer.cancel(); return; }
         if (_webrtc.remoteRenderer.srcObject != null && !_connected) {
           timer.cancel();
-          setState(() { _connected = true; _connecting = false; });
+          setState(() {
+            _connected = true;
+            _connecting = false;
+            _waitingAcceptance = true; // Senior 수락 대기
+          });
           _timeoutTimer?.cancel();
+          // Senior 수락 후 upgradeToCall 완료 감지
+          _watchUpgrade();
         }
       });
+
+      // 60초 타임아웃
+      _timeoutTimer = Timer(const Duration(seconds: 60), () {
+        if (_connecting && !_connected && mounted) _hangUp();
+      });
     } catch (e) {
-      print('모니터링 시작 실패: $e');
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('모니터링 시작 실패: $e')),
-        );
-        Navigator.of(context).pop();
-      }
+      _handleError(e);
     }
+  }
+
+  void _waitForConnection() {
+    // 30초 타임아웃
+    _timeoutTimer = Timer(const Duration(seconds: 30), () {
+      if (_connecting && !_connected && mounted) _hangUp();
+    });
+
+    _connectionCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
+      if (!mounted) { timer.cancel(); return; }
+      if (_webrtc.remoteRenderer.srcObject != null && !_connected) {
+        timer.cancel();
+        setState(() { _connected = true; _connecting = false; });
+        _timeoutTimer?.cancel();
+      }
+    });
+  }
+
+  /// Senior 수락 후 양방향 전환 완료 감지 (upgradeToCall이 자동 호출됨)
+  void _watchUpgrade() {
+    _upgradeCheckTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
+      if (!mounted) { timer.cancel(); return; }
+      if (!_webrtc.isMonitoring && _waitingAcceptance) {
+        timer.cancel();
+        setState(() {
+          _upgraded = true;
+          _waitingAcceptance = false;
+        });
+      }
+    });
   }
 
   void _onRemoteEnd() {
@@ -85,13 +144,12 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
     if (mounted) Navigator.of(context).pop();
   }
 
+  /// 모니터링 중 수동으로 통화 전환 (모니터링 화면에서 버튼 누를 때)
   Future<void> _upgradeToCall() async {
     if (_upgraded) return;
     setState(() => _upgraded = true);
     try {
       await _webrtc.upgradeToCall();
-      // upgradeToCall 내부에서 renegotiate answer 수신 시 _isMonitoring=false
-      // 주기적으로 상태 확인해서 UI 갱신
       _upgradeCheckTimer = Timer.periodic(const Duration(milliseconds: 300), (timer) {
         if (!mounted) { timer.cancel(); return; }
         if (!_webrtc.isMonitoring) {
@@ -100,13 +158,22 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         }
       });
     } catch (e) {
-      print('통화 전환 실패: $e');
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('통화 전환 실패: $e')),
         );
         setState(() => _upgraded = false);
       }
+    }
+  }
+
+  void _handleError(Object e) {
+    print('연결 실패: $e');
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('연결 실패: $e')),
+      );
+      Navigator.of(context).pop();
     }
   }
 
@@ -135,8 +202,10 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
               ),
             ),
 
-          // 로컬 영상 PIP (통화 전환 후)
-          if (_upgraded && !_webrtc.isMonitoring)
+          // 로컬 PIP: callType="call"이면 수락 전부터 표시 / 모니터링은 업그레이드 후만
+          if (_isCall
+              ? (_connected && _webrtc.localRenderer.srcObject != null)
+              : (_upgraded && !_webrtc.isMonitoring))
             Positioned(
               top: 40,
               right: 16,
@@ -162,7 +231,11 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  const Icon(Icons.videocam, color: Colors.white, size: 64),
+                  Icon(
+                    _isCall ? Icons.videocam : Icons.camera_outdoor,
+                    color: Colors.white,
+                    size: 64,
+                  ),
                   const SizedBox(height: 24),
                   Text(
                     widget.targetDeviceName,
@@ -173,9 +246,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                     ),
                   ),
                   const SizedBox(height: 12),
-                  const Text(
-                    '모니터링 연결 중...',
-                    style: TextStyle(color: Colors.white70, fontSize: 16),
+                  Text(
+                    _isCall ? '연결 중...' : '모니터링 연결 중...',
+                    style: const TextStyle(color: Colors.white70, fontSize: 16),
                   ),
                   const SizedBox(height: 24),
                   const CircularProgressIndicator(color: Colors.white),
@@ -183,7 +256,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
               ),
             ),
 
-          // 상단: 모니터링 표시
+          // 상단 상태 배지
           if (_connected)
             Positioned(
               top: 40,
@@ -198,13 +271,19 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      _upgraded ? Icons.videocam : Icons.remove_red_eye,
-                      color: _upgraded ? Colors.green : Colors.orange,
+                      _upgraded
+                          ? Icons.videocam
+                          : (_waitingAcceptance ? Icons.hourglass_top : Icons.remove_red_eye),
+                      color: _upgraded
+                          ? Colors.green
+                          : (_waitingAcceptance ? Colors.amber : Colors.orange),
                       size: 16,
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      _upgraded ? '통화 중' : '모니터링',
+                      _upgraded
+                          ? '통화 중'
+                          : (_waitingAcceptance ? '수락 대기 중...' : '모니터링'),
                       style: const TextStyle(color: Colors.white, fontSize: 14),
                     ),
                   ],
@@ -221,7 +300,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 // 통화 전환 버튼 (모니터링 중에만)
-                if (_connected && !_upgraded)
+                if (_connected && !_isCall && !_upgraded)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: FloatingActionButton.extended(

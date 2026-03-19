@@ -67,5 +67,11 @@ google-services.json
 # Firebase service account keys
 functions/*-adminsdk-*.json
 
+# Firebase project config (local only)
+.firebaserc
+firebase.json
+database.rules.json
+storage.rules
+
 # Build reports
 android/build/
