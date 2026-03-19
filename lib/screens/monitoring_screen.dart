@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
@@ -34,9 +35,11 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   bool _connecting = true;
   bool _upgraded = false;       // 양방향 전환 완료
   bool _waitingAcceptance = false; // callType="call": 수락 대기 중
+  bool _callActiveByOther = false; // 다른 가족이 이미 통화 중
   Timer? _timeoutTimer;
   Timer? _connectionCheckTimer;
   Timer? _upgradeCheckTimer;
+  StreamSubscription? _callStatusSub;
 
   bool get _isCall => widget.callType == 'call';
 
@@ -49,6 +52,19 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
       _startCall();
     } else {
       _startMonitoring();
+    }
+    // 모니터링 중 다른 가족이 통화 시작하면 전환 버튼 숨김
+    if (!_isCall && widget.familyId != null) {
+      _callStatusSub = FirebaseDatabase.instance
+          .ref('families/${widget.familyId}/callStatus/active')
+          .onValue
+          .listen((event) {
+        if (mounted) {
+          setState(() {
+            _callActiveByOther = event.snapshot.value == true;
+          });
+        }
+      });
     }
   }
 
@@ -182,6 +198,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
     _timeoutTimer?.cancel();
     _connectionCheckTimer?.cancel();
     _upgradeCheckTimer?.cancel();
+    _callStatusSub?.cancel();
     _webrtc.dispose();
     _signaling.dispose();
     super.dispose();
@@ -299,8 +316,8 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                // 통화 전환 버튼 (모니터링 중에만)
-                if (_connected && !_isCall && !_upgraded)
+                // 통화 전환 버튼 (모니터링 중 + 다른 가족이 통화 중이지 않을 때)
+                if (_connected && !_isCall && !_upgraded && !_callActiveByOther)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
                     child: FloatingActionButton.extended(
