@@ -381,6 +381,7 @@ stateDiagram-v2
 | 함수명 | 트리거 | 역할 |
 | ------ | ------ | ---- |
 | `onPhotoAllDownloaded` | RTDB `downloadedBy/{did}` write | 모든 Senior 다운로드 완료 → 원본 Storage 삭제 + status: done (thumbs는 유지) |
+| `onPhotoDeleted` | RTDB `photoSync/{photoId}/status` update | status→deleted 즉시 → 썸네일 Storage 삭제 (1:N Family 구조 일관 처리) |
 | `onReminderMediaDownloaded` | RTDB `mediaDownloaded` update | targetDevice 다운로드 완료 → Storage 삭제 |
 | `onReminderDeleted` | RTDB `reminders/{rid}` delete | 알림 삭제 → Storage 파일 삭제 |
 | `cleanupExpiredPhotos` | 스케줄 6시간 | 만료/done 정리 + thumbPath도 함께 삭제 |
@@ -519,7 +520,8 @@ stateDiagram-v2
 
 ### Cloud Functions
 
-- `onPhotoAllDownloaded` — RTDB 트리거: 모든 Senior 다운로드 → Storage 삭제
+- `onPhotoAllDownloaded` — RTDB 트리거: 모든 Senior 다운로드 → 원본 Storage 삭제
+- `onPhotoDeleted` — RTDB 트리거: status→deleted → 썸네일 Storage 즉시 삭제
 - `onReminderMediaDownloaded` — RTDB 트리거: 미디어 다운로드 → Storage 삭제
 - `onReminderDeleted` — RTDB 트리거: 알림 삭제 → Storage 삭제
 - `cleanupExpiredPhotos` — 스케줄: 만료/done 정리

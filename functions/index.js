@@ -488,6 +488,36 @@ exports.onPhotoDownloaded = functions.database
   });
 
 // ============================================================
+// RTDB 트리거: 사진 삭제 요청 → 썸네일 Storage 즉시 삭제
+// ============================================================
+exports.onPhotoDeleted = functions.database
+  .ref("/families/{familyId}/photoSync/{photoId}/status")
+  .onUpdate(async (change, context) => {
+    if (change.after.val() !== "deleted") return null;
+
+    const { familyId, photoId } = context.params;
+
+    const snap = await admin.database()
+      .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
+      .once("value");
+    const thumbPath = snap.val();
+    if (!thumbPath) return null;
+
+    try {
+      await admin.storage().bucket().file(thumbPath).delete();
+      console.log(`onPhotoDeleted: 썸네일 삭제 ${thumbPath}`);
+    } catch (e) {
+      console.warn(`onPhotoDeleted: 썸네일 삭제 실패 (무시): ${e.message}`);
+    }
+
+    await admin.database()
+      .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
+      .remove();
+
+    return null;
+  });
+
+// ============================================================
 // RTDB 트리거: 알림 미디어 다운로드 완료 → Storage 삭제
 // ============================================================
 exports.onReminderMediaDownloaded = functions.database
