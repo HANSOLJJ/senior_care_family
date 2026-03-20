@@ -113,15 +113,8 @@ class PhotoTransferService {
     print('사진 삭제: $photoId RTDB 노드 제거');
   }
 
-  /// 사진 추가 스트림 (onChildAdded — 기존 항목 replay + 신규 추가)
-  Stream<DatabaseEvent> onPhotoAdded(String familyId) =>
-      _db.ref('families/$familyId/photoSync').onChildAdded;
-
-  /// 사진 변경 스트림 (status 변경 등)
-  Stream<DatabaseEvent> onPhotoChanged(String familyId) =>
-      _db.ref('families/$familyId/photoSync').onChildChanged;
-
-  /// 사진 제거 스트림
-  Stream<DatabaseEvent> onPhotoRemoved(String familyId) =>
-      _db.ref('families/$familyId/photoSync').onChildRemoved;
+  /// photoSync 전체 스트림 (onValue — 전체 스냅샷)
+  /// persistence delta sync로 실제 네트워크 전송은 변경분만.
+  Stream<DatabaseEvent> watchPhotoSync(String familyId) =>
+      _db.ref('families/$familyId/photoSync').onValue;
 }

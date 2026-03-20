@@ -482,14 +482,28 @@ stateDiagram-v2
 3. 7일 초과 미수신: Cloud Function이 Storage 삭제 + status: "expired"
 4. Family에서 재전송 버튼으로 다시 업로드 가능
 
+### 오프라인 중 삭제 처리 (persistence + onValue)
+
+Family가 사진 삭제 → RTDB 노드 즉시 remove() → Senior가 오프라인이어도 OK:
+
+- `setPersistenceEnabled(true)`: 재연결 시 delta sync → `onDataChange` 발동
+- `onDataChange`에서 RTDB 파일 목록 vs 로컬 파일 비교 → 고아 파일 삭제
+- persistence 캐시(SQLite)에서 즉시 표시 → 서버 sync 후 reconcile
+
+| 상황 | 처리 |
+| ---- | ---- |
+| Senior 온라인 중 삭제 | onDataChange 즉시 발동 → 로컬 파일 삭제 |
+| Senior 오프라인 중 삭제 | 재연결 시 onDataChange 발동 → 로컬 파일 삭제 |
+| 앱 재시작 | persistence 캐시 → 즉시 표시 → 서버 sync |
+
 ---
 
 ## 비용 (5000명 기준, 가족당 100장/월)
 
 | 항목 | 계산 | 월 비용 |
 | ---- | ---- | ------- |
-| RTDB: onChildAdded (URL만, ~200bytes) | 5000명×100장×200bytes = 0.1GB | ~$0 |
-| RTDB: 앱 재시작 replay | 5000명×2.5회/일×500장×200bytes×30일 = 375MB | ~$0 |
+| RTDB: onValue + persistence delta sync | 변경분만 전송 (onChild와 동일 수준) | ~$0 |
+| RTDB: 앱 재시작 (persistence 캐시 hit) | delta만 수신, 변경 없으면 트래픽 0 | ~$0 |
 | Storage: 썸네일 영구 저장 (500장) | 5000명×500장×100KB = 250GB | ~$7.5 |
 | Storage: 썸네일 최초 다운 (캐시 미스) | 5000명×100장×100KB = 50GB | ~$6 |
 | Storage: 원본 임시 버퍼 (전달 후 삭제) | 가족당 100장×800KB | ~$47 |
@@ -521,7 +535,7 @@ stateDiagram-v2
 ### Cloud Functions
 
 - `onPhotoAllDownloaded` — RTDB 트리거: 모든 Senior 다운로드 → 원본 Storage 삭제
-- `onPhotoDeleted` — RTDB 트리거: status→deleted → 썸네일 Storage 즉시 삭제
+- `onPhotoDeleted` — RTDB 트리거: photoSync 노드 onDelete → 썸네일 Storage 삭제
 - `onReminderMediaDownloaded` — RTDB 트리거: 미디어 다운로드 → Storage 삭제
 - `onReminderDeleted` — RTDB 트리거: 알림 삭제 → Storage 삭제
 - `cleanupExpiredPhotos` — 스케줄: 만료/done 정리

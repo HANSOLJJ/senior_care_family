@@ -137,44 +137,23 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   }
 
   void _watchPhotos() {
-    // keepSynced: 화면 밖에서도 최신 상태 유지 → 재진입 시 즉시 표시
-    FirebaseDatabase.instance
-        .ref('families/${widget.familyId}/photoSync')
-        .keepSynced(true);
-
-    final addedSub = _photoService.onPhotoAdded(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      final value = event.snapshot.value;
-      if (id == null || value == null) return;
-      final info = Map<String, dynamic>.from(value as Map);
-      // done 상태 + thumbUrl 있는 것만 표시
-      if (info['thumbUrl'] != null &&
-          (info['status'] == 'done' || info['status'] == 'pending')) {
-        if (mounted) setState(() => _photoMap[id] = info);
+    final sub = _photoService.watchPhotoSync(widget.familyId).listen((event) {
+      final data = event.snapshot.value;
+      final newMap = <String, Map<String, dynamic>>{};
+      if (data != null) {
+        final raw = Map<String, dynamic>.from(data as Map);
+        for (final entry in raw.entries) {
+          final id = entry.key;
+          final info = Map<String, dynamic>.from(entry.value as Map);
+          if (info['thumbUrl'] != null &&
+              (info['status'] == 'done' || info['status'] == 'pending')) {
+            newMap[id] = info;
+          }
+        }
       }
+      if (mounted) setState(() => _photoMap..clear()..addAll(newMap));
     });
-
-    final changedSub = _photoService.onPhotoChanged(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      final value = event.snapshot.value;
-      if (id == null || value == null) return;
-      final info = Map<String, dynamic>.from(value as Map);
-      if (info['thumbUrl'] != null &&
-          (info['status'] == 'done' || info['status'] == 'pending')) {
-        if (mounted) setState(() => _photoMap[id] = info);
-      } else {
-        // deleted/expired 상태 → 목록에서 제거
-        if (mounted) setState(() => _photoMap.remove(id));
-      }
-    });
-
-    final removedSub = _photoService.onPhotoRemoved(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      if (id == null) return;
-      if (mounted) setState(() => _photoMap.remove(id));
-    });
-
-    _subs.addAll([addedSub, changedSub, removedSub]);
+    _subs.add(sub);
   }
 
   Future<void> _loadMembers() async {

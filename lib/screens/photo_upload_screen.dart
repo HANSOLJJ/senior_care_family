@@ -31,37 +31,23 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   }
 
   void _watchPhotos() {
-    final addedSub = _service.onPhotoAdded(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      final value = event.snapshot.value;
-      if (id == null || value == null) return;
-      final info = Map<String, dynamic>.from(value as Map);
-      final status = info['status'] as String? ?? 'pending';
-      if (status == 'deleted' || status == 'expired') return;
-      if (info['thumbUrl'] == null) return;
-      if (mounted) setState(() => _photoMap[id] = _PhotoItem.fromMap(id, info));
-    });
-
-    final changedSub = _service.onPhotoChanged(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      final value = event.snapshot.value;
-      if (id == null || value == null) return;
-      final info = Map<String, dynamic>.from(value as Map);
-      final status = info['status'] as String? ?? 'pending';
-      if (status == 'deleted' || status == 'expired') {
-        if (mounted) setState(() => _photoMap.remove(id));
-      } else if (info['thumbUrl'] != null) {
-        if (mounted) setState(() => _photoMap[id] = _PhotoItem.fromMap(id, info));
+    final sub = _service.watchPhotoSync(widget.familyId).listen((event) {
+      final data = event.snapshot.value;
+      final newMap = <String, _PhotoItem>{};
+      if (data != null) {
+        final raw = Map<String, dynamic>.from(data as Map);
+        for (final entry in raw.entries) {
+          final id = entry.key;
+          final info = Map<String, dynamic>.from(entry.value as Map);
+          final status = info['status'] as String? ?? 'pending';
+          if (status == 'expired') continue;
+          if (info['thumbUrl'] == null) continue;
+          newMap[id] = _PhotoItem.fromMap(id, info);
+        }
       }
+      if (mounted) setState(() => _photoMap..clear()..addAll(newMap));
     });
-
-    final removedSub = _service.onPhotoRemoved(widget.familyId).listen((event) {
-      final id = event.snapshot.key;
-      if (id == null) return;
-      if (mounted) setState(() => _photoMap.remove(id));
-    });
-
-    _subs.addAll([addedSub, changedSub, removedSub]);
+    _subs.add(sub);
   }
 
   List<_PhotoItem> get _sortedPhotos {

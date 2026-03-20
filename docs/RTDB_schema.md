@@ -142,17 +142,19 @@ Firebase RTDB
     │       ├── uploadedBy: string
     │       ├── uploadedByName: string
     │       ├── createdAt: timestamp
-    │       ├── status: string                  # "pending"|"done"|"expired"|"deleted"
+    │       ├── status: string                  # "pending"|"done"|"expired"
     │       ├── retryCount: number
     │       └── downloadedBy/                   # 각 Senior 다운로드 완료 기록
     │           └── {deviceId}: true
     │
-    │   Writer: Family (업로드), Senior (상태 변경), Cloud Function (만료)
+    │   Writer: Family (업로드/삭제), Senior (downloadedBy), Cloud Function (만료/Storage)
     │   ※ thumbnail(base64) 필드 제거 → thumbUrl(Storage URL)로 교체
-    │   ※ Family 앱: onChildAdded/Changed/Removed 구독 (onValue 아님)
-    │   ※ Family 앱: setPersistenceEnabled(true) + keepSynced(true) 적용
+    │   ※ "deleted" 상태 제거 → Family가 RTDB 노드를 즉시 remove()
+    │   ※ Family 앱: onValue 구독 + setPersistenceEnabled(true)
+    │   ※   persistence delta sync: 변경분만 수신, 앱 재시작 시 즉시 표시
     │   ※   로컬 SQLite 캐시: /data/data/com.seniorcare.family/databases/
-    │   ※ Senior 앱: ChildEventListener 사용 (변경된 항목만 수신)
+    │   ※ Senior 앱: ValueEventListener + setPersistenceEnabled(true)
+    │   ※   onDataChange: RTDB 파일목록 vs 로컬 비교 → 고아 파일 자동 삭제
     │
     ├── reminders/
     │   └── {reminderId}/
@@ -289,6 +291,7 @@ Cloud Function    → 모든 Senior 완료 → temp Storage 삭제 + status: "do
 만료 (7일)       → status: "expired" + temp Storage 삭제 (Cloud Function)
                   → thumbs Storage도 삭제
 RTDB 정리 (37일) → RTDB 항목 완전 삭제 (Cloud Function)
-Family 삭제 요청  → status: "deleted" → Senior 로컬 파일 삭제
-                  → Cloud Function: thumbs Storage 삭제
+Family 삭제 요청  → RTDB 노드 즉시 remove()
+                  → Cloud Function(onPhotoDeleted, onDelete 트리거): thumbs Storage 삭제
+                  → Senior: onDataChange → 로컬 파일 자동 삭제 (오프라인 중이어도 재연결 시)
 ```
