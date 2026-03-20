@@ -105,14 +105,13 @@ class PhotoTransferService {
     return photoId;
   }
 
-  /// 사진 삭제 요청 (Senior에서 로컬 삭제 유도)
+  /// 사진 삭제: RTDB 노드 즉시 제거
+  /// - Senior: onChildRemoved 감지 → 로컬 파일 삭제
+  /// - Cloud Function(onPhotoDeleted): thumbPath Storage 삭제
   Future<void> deletePhoto(String familyId, String photoId) async {
-    await _db.ref('families/$familyId/photoSync/$photoId/status').set('deleted');
-    print('사진 삭제 요청: $photoId → deleted');
+    await _db.ref('families/$familyId/photoSync/$photoId').remove();
+    print('사진 삭제: $photoId RTDB 노드 제거');
   }
-
-  // Storage 삭제는 Cloud Function(onPhotoDownloaded)이 담당.
-  // Family 앱에서 직접 삭제하지 않음.
 
   /// 사진 추가 스트림 (onChildAdded — 기존 항목 replay + 신규 추가)
   Stream<DatabaseEvent> onPhotoAdded(String familyId) =>

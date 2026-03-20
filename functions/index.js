@@ -231,14 +231,8 @@ async function doCleanup() {
         console.log(`RTDB 삭제: families/${familyId}/photoSync/${photoId}`);
       }
 
-      // deleted → 썸네일 삭제 + RTDB 정리 (Family가 삭제 요청한 항목)
-      if (status === "deleted" && thumbPath) {
-        await deleteFile(thumbPath);
-        await admin.database()
-          .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
-          .remove();
-        console.log(`deleted 썸네일 삭제: ${thumbPath}`);
-      }
+      // deleted 상태는 더 이상 사용하지 않음.
+      // Family 앱이 RTDB 노드를 즉시 removeValue() → onPhotoDeleted(onDelete)가 처리.
     }
   }
 
@@ -488,19 +482,14 @@ exports.onPhotoDownloaded = functions.database
   });
 
 // ============================================================
-// RTDB 트리거: 사진 삭제 요청 → 썸네일 Storage 즉시 삭제
+// RTDB 트리거: 사진 RTDB 노드 삭제 → 썸네일 Storage 삭제
+// Family 앱이 deletePhoto() 시 노드를 즉시 remove() → 이 트리거 발동
 // ============================================================
 exports.onPhotoDeleted = functions.database
-  .ref("/families/{familyId}/photoSync/{photoId}/status")
-  .onUpdate(async (change, context) => {
-    if (change.after.val() !== "deleted") return null;
-
-    const { familyId, photoId } = context.params;
-
-    const snap = await admin.database()
-      .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
-      .once("value");
-    const thumbPath = snap.val();
+  .ref("/families/{familyId}/photoSync/{photoId}")
+  .onDelete(async (snapshot) => {
+    const photo = snapshot.val();
+    const thumbPath = photo && photo.thumbPath;
     if (!thumbPath) return null;
 
     try {
@@ -509,10 +498,6 @@ exports.onPhotoDeleted = functions.database
     } catch (e) {
       console.warn(`onPhotoDeleted: 썸네일 삭제 실패 (무시): ${e.message}`);
     }
-
-    await admin.database()
-      .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
-      .remove();
 
     return null;
   });
