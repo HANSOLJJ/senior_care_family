@@ -4,7 +4,7 @@
 
 Family 앱 → Firebase Storage (임시 버퍼) → Senior 태블릿 로컬 저장.
 RTDB로 전송 큐/상태 관리. 모든 Senior 다운로드 완료 시 Cloud Function이 Storage 자동 삭제.
-영구 저장은 태블릿 로컬에만. 클라우드 비용 거의 $0.
+영구 저장은 태블릿 로컬에만. 썸네일만 Storage에 영구 보관 (Family 앱 표시용).
 
 **사진과 알림 미디어 모두 동일한 임시 버퍼 패턴 사용.**
 
@@ -51,9 +51,10 @@ sequenceDiagram
     participant CF as Cloud Function
 
     F->>F: 사진 선택 + 리사이즈 + 압축
-    F->>F: 썸네일 생성 (200x200px)
-    F->>S: 업로드 (families/fid/temp/)
-    F->>R: photoSync/photoId 등록 (pending)
+    F->>F: 썸네일 생성 (400×400px, JPEG 80%, ~100KB)
+    F->>S: 원본 업로드 (families/fid/temp/)
+    F->>S: 썸네일 업로드 (families/fid/thumbs/) ← 영구 저장
+    F->>R: photoSync/photoId 등록 (pending, thumbUrl 포함)
     Note over F: 앱 꺼도 OK
 
     Sr->>R: pending 감지 (RTDB 감시)
@@ -106,7 +107,9 @@ sequenceDiagram
 ```text
 families/{familyId}/
   temp/
-    photo_{생성자}_{날짜시간}.jpg         # 사진 (임시, 다운로드 후 삭제)
+    {photoId}.jpg                         # 사진 원본 (임시, Senior 다운로드 후 삭제)
+  thumbs/
+    {photoId}.jpg                         # 사진 썸네일 400×400px (영구, Family 앱 표시용)
   reminders/
     {reminderId}/
       {제목}_{생성자}_{날짜}.mp4          # 알림 영상 (임시, 다운로드 후 삭제)
@@ -130,16 +133,21 @@ families/{familyId}/
     fileName: string            # "photo_딸_20260317_143052.jpg"
     size: number                # 바이트
     checksum: string            # MD5 해시
-    storageUrl: string          # Firebase Storage 다운로드 URL
-    storagePath: string         # Storage 경로 (삭제용)
+    storageUrl: string          # 원본 임시 Storage URL (done 후 필드 제거됨)
+    storagePath: string         # 원본 임시 Storage 경로 (삭제용, done 후 필드 제거됨)
+    thumbUrl: string            # 썸네일 영구 Storage URL (Family 앱 표시용)
+    thumbPath: string           # 썸네일 Storage 경로 (사진 삭제 시 Cloud Function이 삭제)
     uploadedBy: string          # userId
     uploadedByName: string      # "딸"
     createdAt: timestamp
-    status: string              # "pending" | "downloading" | "done" | "expired" | "deleted"
+    status: string              # "pending" | "done" | "expired" | "deleted"
     retryCount: number          # 실패 시 증가
-    thumbnail: string           # base64 인코딩된 썸네일 (200×200px, ~4KB)
     downloadedBy/               # 각 Senior 다운로드 완료 기록
       {deviceId}: true
+
+※ thumbnail(base64) 필드 없음 → thumbUrl(Storage URL)로 대체
+※ Family 앱은 onChildAdded/Changed/Removed로 구독 (onValue 사용하지 않음)
+※ 앱 재시작 시 onChildAdded가 기존 항목 replay + RTDB offline persistence 로컬 캐시
 ```
 
 ### 알림
@@ -213,10 +221,12 @@ flowchart TD
 ```text
 사진 선택 → 리사이즈 (긴 변 maxResolution px 이하)
          → JPEG 압축 (quality%)
-         → 썸네일 생성 (200×200px, JPEG 75%, base64)
+         → 썸네일 생성 (400×400px, JPEG 80%, ~100KB)
          → MD5 체크섬 계산
-         → Firebase Storage 업로드 (families/{fid}/temp/photo_딸_20260317_143052.jpg)
-         → RTDB photoSync/{photoId} 메타 등록 (status: "pending")
+         → Storage 업로드 ①: 원본 → families/{fid}/temp/{photoId}.jpg (임시)
+         → Storage 업로드 ②: 썸네일 → families/{fid}/thumbs/{photoId}.jpg (영구)
+         → thumbUrl = getDownloadURL()
+         → RTDB photoSync/{photoId} 메타 등록 (status: "pending", thumbUrl 포함)
 ```
 
 ### 2. Senior 태블릿 수신 (복수대 지원)
@@ -370,10 +380,10 @@ stateDiagram-v2
 
 | 함수명 | 트리거 | 역할 |
 | ------ | ------ | ---- |
-| `onPhotoAllDownloaded` | RTDB `downloadedBy/{did}` write | 모든 Senior 다운로드 완료 → Storage 삭제 + status: done |
+| `onPhotoAllDownloaded` | RTDB `downloadedBy/{did}` write | 모든 Senior 다운로드 완료 → 원본 Storage 삭제 + status: done (thumbs는 유지) |
 | `onReminderMediaDownloaded` | RTDB `mediaDownloaded` update | targetDevice 다운로드 완료 → Storage 삭제 |
 | `onReminderDeleted` | RTDB `reminders/{rid}` delete | 알림 삭제 → Storage 파일 삭제 |
-| `cleanupExpiredPhotos` | 스케줄 6시간 | 만료/done 정리 |
+| `cleanupExpiredPhotos` | 스케줄 6시간 | 만료/done 정리 + thumbPath도 함께 삭제 |
 | `cleanupOrphanedData` | 스케줄 매일 3시 | 고아 RTDB + Storage 정리 |
 
 ---
@@ -409,16 +419,48 @@ stateDiagram-v2
 ### 목적
 
 - 가족 구성원 누구나 "어떤 사진이 보내졌는지" 확인 가능
-- 원본은 Senior 태블릿 로컬에만 존재, 썸네일은 RTDB에 공유
+- 원본은 Senior 태블릿 로컬에만 존재, 썸네일은 Firebase Storage에 영구 보관
 
 ### 생성 (Family 앱, 업로드 시)
 
 ```text
-원본 사진 → 200×200px 리사이즈 → JPEG quality 75% → base64 인코딩 → RTDB 저장
+원본 사진 → 400×400px 리사이즈 → JPEG quality 80% → Storage 업로드 → URL을 RTDB에 저장
 ```
 
 - `flutter_image_compress`로 처리
-- 결과: ~4KB/장 (base64 문자열)
+- 결과: ~100KB/장 (Storage URL 문자열만 RTDB에 저장, ~200bytes)
+- RTDB에 base64 저장하지 않음 (비용 절감 핵심)
+
+### Family 앱 표시
+
+- `cached_network_image` 패키지 사용
+- 최초 1회 다운로드 후 앱 캐시 디렉토리에 저장 (LRU 200MB / 30일 자동 만료)
+- photoId가 Firebase push key (불변)이므로 URL 변경 없음 → 캐시 무효화 불필요
+- 사진 삭제 시: `CachedNetworkImage.evictFromCache(thumbUrl)` (LRU가 자동 처리하므로 선택적)
+
+### 삭제
+
+- Cloud Function이 사진 삭제/만료 시 `families/{fid}/thumbs/{photoId}.jpg` 도 함께 삭제
+
+### Family 앱 RTDB 오프라인 캐시
+
+**`setPersistenceEnabled(true)`** — `main.dart` Firebase 초기화 직후 1회 호출
+- RTDB 수신 데이터를 기기 내부 SQLite DB에 저장 (`/data/data/{패키지명}/databases/`)
+- 앱 재시작 시 네트워크 연결 전에 로컬 캐시에서 UI 즉시 표시
+- 온라인 복귀 시 변경분만 sync (전체 재수신 없음)
+- 기본 캐시 크기: 10MB (photoSync는 URL만이라 ~0.5MB 수준)
+
+**`keepSynced(true)`** — `family_detail_screen.dart` initState에서 familyId 확정 후 호출
+- `families/{fid}/photoSync` 노드를 앱 실행 중 항상 최신 상태로 유지
+- 화면 재진입 시 로컬 캐시에서 즉시 표시 + 변경분만 수신
+- 앱 재시작 시 `onChildAdded`가 기존 항목 모두 replay → 기기 캐시 이미지와 결합해 즉시 표시
+
+| 상황        | persistence 없음                  | persistence + keepSynced  |
+| ----------- | --------------------------------- | ------------------------- |
+| 앱 재시작   | onChildAdded replay 기다려야 표시 | 로컬 캐시에서 즉시 표시   |
+| 화면 재진입 | 다시 구독 → 전체 replay           | 즉시 표시                 |
+| 오프라인    | 빈 화면                           | 마지막 상태 표시          |
+| 온라인 복귀 | 전체 replay                       | 변경분만 sync             |
 
 ---
 
@@ -441,15 +483,21 @@ stateDiagram-v2
 
 ---
 
-## 비용
+## 비용 (5000명 기준, 가족당 100장/월)
 
-| 항목 | 비용 |
-| ---- | ---- |
-| RTDB 메타+썸네일 (1000명 × 500장) | ~$0 (무료 1GB) |
-| Firebase Storage (임시 버퍼) | ~$0.01/월 |
-| 다운로드 (Senior) | ~$0.01/월 |
-| Cloud Functions 트리거 | ~$0 (무료 200만 호출/월) |
-| **합계** | **~$0/월** |
+| 항목 | 계산 | 월 비용 |
+| ---- | ---- | ------- |
+| RTDB: onChildAdded (URL만, ~200bytes) | 5000명×100장×200bytes = 0.1GB | ~$0 |
+| RTDB: 앱 재시작 replay | 5000명×2.5회/일×500장×200bytes×30일 = 375MB | ~$0 |
+| Storage: 썸네일 영구 저장 (500장) | 5000명×500장×100KB = 250GB | ~$7.5 |
+| Storage: 썸네일 최초 다운 (캐시 미스) | 5000명×100장×100KB = 50GB | ~$6 |
+| Storage: 원본 임시 버퍼 (전달 후 삭제) | 가족당 100장×800KB | ~$47 |
+| Cloud Functions 트리거 | ~$0 (무료 200만 호출/월) | ~$0 |
+| **합계** | | **~$66/월** |
+
+> 원본 사진 전달($47)이 최대 비용. RTDB는 무료 구간 내.
+> `cached_network_image` 기기 캐시 덕분에 썸네일 재다운 최소화.
+> 최적화 전 (onValue + base64): 5000명 기준 ~$18,750/월
 
 ---
 

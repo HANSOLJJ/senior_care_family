@@ -188,45 +188,56 @@ async function doCleanup() {
     if (!photoSync) continue;
 
     for (const [photoId, photo] of Object.entries(photoSync)) {
-      const { status, createdAt, storagePath } = photo;
+      const { status, createdAt, storagePath, thumbPath } = photo;
 
-      // 7일 만료: pending/downloading → expired
-      if ((status === "pending" || status === "downloading") && createdAt < expireCutoff) {
-        if (storagePath) {
-          try {
-            await bucket.file(storagePath).delete();
-          } catch (e) {
-            if (e.code !== 404) {
-              console.error(`Storage 삭제 실패: ${storagePath}`, e.message);
-            }
-          }
+      // Storage 파일 삭제 헬퍼
+      const deleteFile = async (path) => {
+        if (!path) return;
+        try {
+          await bucket.file(path).delete();
+        } catch (e) {
+          if (e.code !== 404) console.error(`Storage 삭제 실패: ${path}`, e.message);
         }
+      };
+
+      // 7일 만료: pending/downloading → expired + 원본 Storage 삭제 + 썸네일 삭제
+      if ((status === "pending" || status === "downloading") && createdAt < expireCutoff) {
+        await deleteFile(storagePath);
+        await deleteFile(thumbPath);
         await admin.database()
           .ref(`families/${familyId}/photoSync/${photoId}`)
-          .update({ status: "expired", storagePath: null });
+          .update({ status: "expired", storagePath: null, thumbPath: null });
         expired++;
         console.log(`만료 처리: families/${familyId}/photoSync/${photoId}`);
       }
 
-      // done → Storage 삭제 (Senior가 못 지운 경우 보험)
+      // done → 원본 Storage 잔여 삭제 보험 (thumbPath는 유지)
       if (status === "done" && storagePath) {
-        try {
-          await bucket.file(storagePath).delete();
-          console.log(`done Storage 삭제: ${storagePath}`);
-        } catch (e) { /* 이미 삭제됐을 수 있음 */ }
+        await deleteFile(storagePath);
         await admin.database()
           .ref(`families/${familyId}/photoSync/${photoId}/storagePath`)
           .remove();
         cleaned++;
+        console.log(`done 원본 Storage 삭제 (보험): ${storagePath}`);
       }
 
-      // 37일 정리: expired → 완전 삭제
+      // 37일 정리: expired → RTDB 완전 삭제 + 썸네일 삭제
       if (status === "expired" && createdAt < cleanupCutoff) {
+        await deleteFile(thumbPath); // expired 처리 시 지웠어도 재시도 무해
         await admin.database()
           .ref(`families/${familyId}/photoSync/${photoId}`)
           .remove();
         cleaned++;
         console.log(`RTDB 삭제: families/${familyId}/photoSync/${photoId}`);
+      }
+
+      // deleted → 썸네일 삭제 + RTDB 정리 (Family가 삭제 요청한 항목)
+      if (status === "deleted" && thumbPath) {
+        await deleteFile(thumbPath);
+        await admin.database()
+          .ref(`families/${familyId}/photoSync/${photoId}/thumbPath`)
+          .remove();
+        console.log(`deleted 썸네일 삭제: ${thumbPath}`);
       }
     }
   }
@@ -456,18 +467,20 @@ exports.onPhotoDownloaded = functions.database
 
     if (downloadedCount < seniorCount) return null;
 
-    // 모든 Senior 다운로드 완료 → Storage 삭제 + status: done
+    // 모든 Senior 다운로드 완료 → 원본 Storage 삭제 + status: done
+    // (썸네일 thumbPath는 영구 보관 — Family 앱 표시용)
     if (photo.storagePath) {
       try {
         await admin.storage().bucket().file(photo.storagePath).delete();
-        console.log(`Storage 삭제: ${photo.storagePath}`);
+        console.log(`Storage 원본 삭제: ${photo.storagePath}`);
       } catch (e) {
-        console.warn(`Storage 삭제 실패 (무시): ${e.message}`);
+        console.warn(`Storage 원본 삭제 실패 (무시): ${e.message}`);
       }
     }
 
     await db.ref(`families/${familyId}/photoSync/${photoId}`).update({
       status: "done",
+      storagePath: null,
       completedAt: admin.database.ServerValue.TIMESTAMP,
     });
 

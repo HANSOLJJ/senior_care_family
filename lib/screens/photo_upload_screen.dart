@@ -1,8 +1,7 @@
-import 'dart:convert';
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:firebase_database/firebase_database.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/photo_transfer_service.dart';
 
@@ -18,10 +17,12 @@ class PhotoUploadScreen extends StatefulWidget {
 class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   final _service = PhotoTransferService();
   final _picker = ImagePicker();
-  StreamSubscription<DatabaseEvent>? _syncSub;
-  List<_PhotoItem> _photos = [];
+  final List<StreamSubscription> _subs = [];
+  final Map<String, _PhotoItem> _photoMap = {};
   bool _uploading = false;
   double _uploadProgress = 0;
+  int _uploadTotal = 0;
+  int _uploadCurrent = 0;
 
   @override
   void initState() {
@@ -30,40 +31,44 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
   }
 
   void _watchPhotos() {
-    _syncSub = _service.watchPhotoSync(widget.familyId).listen((event) {
-      final data = event.snapshot.value as Map?;
-      if (data == null) {
-        if (mounted) setState(() => _photos = []);
-        return;
-      }
-
-      final list = <_PhotoItem>[];
-      for (final entry in data.entries) {
-        final id = entry.key as String;
-        final info = Map<String, dynamic>.from(entry.value as Map);
-        final status = info['status'] as String? ?? 'pending';
-        if (status == 'deleted' || status == 'expired') continue;
-
-        // Storage 삭제는 Cloud Function(onPhotoDownloaded)이 담당
-
-        list.add(_PhotoItem(
-          id: id,
-          thumbnail: info['thumbnail'] as String? ?? '',
-          uploadedByName: info['uploadedByName'] as String? ?? '',
-          createdAt: info['createdAt'] as int? ?? 0,
-          status: status,
-          size: info['size'] as int? ?? 0,
-        ));
-      }
-
-      // 최신순 정렬
-      list.sort((a, b) => b.createdAt.compareTo(a.createdAt));
-      if (mounted) setState(() => _photos = list);
+    final addedSub = _service.onPhotoAdded(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      final value = event.snapshot.value;
+      if (id == null || value == null) return;
+      final info = Map<String, dynamic>.from(value as Map);
+      final status = info['status'] as String? ?? 'pending';
+      if (status == 'deleted' || status == 'expired') return;
+      if (info['thumbUrl'] == null) return;
+      if (mounted) setState(() => _photoMap[id] = _PhotoItem.fromMap(id, info));
     });
+
+    final changedSub = _service.onPhotoChanged(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      final value = event.snapshot.value;
+      if (id == null || value == null) return;
+      final info = Map<String, dynamic>.from(value as Map);
+      final status = info['status'] as String? ?? 'pending';
+      if (status == 'deleted' || status == 'expired') {
+        if (mounted) setState(() => _photoMap.remove(id));
+      } else if (info['thumbUrl'] != null) {
+        if (mounted) setState(() => _photoMap[id] = _PhotoItem.fromMap(id, info));
+      }
+    });
+
+    final removedSub = _service.onPhotoRemoved(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      if (id == null) return;
+      if (mounted) setState(() => _photoMap.remove(id));
+    });
+
+    _subs.addAll([addedSub, changedSub, removedSub]);
   }
 
-  int _uploadTotal = 0;
-  int _uploadCurrent = 0;
+  List<_PhotoItem> get _sortedPhotos {
+    final list = _photoMap.values.toList()
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    return list;
+  }
 
   /// 갤러리에서 다중 선택
   Future<void> _pickMultiAndUpload() async {
@@ -158,22 +163,34 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               // 썸네일 크게
-              if (photo.thumbnail.isNotEmpty)
+              if (photo.thumbUrl.isNotEmpty)
                 ClipRRect(
                   borderRadius: BorderRadius.circular(8),
-                  child: Image.memory(
-                    base64Decode(photo.thumbnail),
-                    width: 200, height: 200, fit: BoxFit.cover,
+                  child: CachedNetworkImage(
+                    imageUrl: photo.thumbUrl,
+                    width: 200,
+                    height: 200,
+                    fit: BoxFit.cover,
+                    placeholder: (_, _) => Container(
+                      width: 200,
+                      height: 200,
+                      color: Colors.grey[800],
+                      child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                    ),
+                    errorWidget: (_, _, _) => Container(
+                      width: 200,
+                      height: 200,
+                      color: Colors.grey[800],
+                      child: const Icon(Icons.broken_image, color: Colors.grey, size: 48),
+                    ),
                   ),
                 ),
               const SizedBox(height: 16),
-              // 정보 행들
               _detailRow('보낸 사람', photo.uploadedByName),
               _detailRow('날짜', _formatDateFull(photo.createdAt)),
               _detailRow('용량', _formatSize(photo.size)),
               _detailRow('상태', _statusText(photo.status)),
               const SizedBox(height: 16),
-              // 삭제 버튼
               if (photo.status == 'done')
                 SizedBox(
                   width: double.infinity,
@@ -237,21 +254,23 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
 
   @override
   void dispose() {
-    _syncSub?.cancel();
+    for (final sub in _subs) {
+      sub.cancel();
+    }
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final photos = _sortedPhotos;
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
         backgroundColor: Colors.black,
-        title: Text('사진 보내기${_photos.isNotEmpty ? ' (${_photos.length})' : ''}'),
+        title: Text('사진 보내기${photos.isNotEmpty ? ' (${photos.length})' : ''}'),
       ),
       body: Column(
         children: [
-          // 업로드 진행률
           if (_uploading)
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -269,8 +288,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
               ),
             ),
 
-          // 설명
-          if (_photos.isNotEmpty)
+          if (photos.isNotEmpty)
             const Padding(
               padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: Text(
@@ -279,9 +297,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
               ),
             ),
 
-          // 사진 그리드
           Expanded(
-            child: _photos.isEmpty
+            child: photos.isEmpty
                 ? const Center(
                     child: Text(
                       '보낸 사진이 없습니다\n아래 버튼으로 사진을 보내보세요',
@@ -296,8 +313,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
                       crossAxisSpacing: 2,
                       mainAxisSpacing: 2,
                     ),
-                    itemCount: _photos.length,
-                    itemBuilder: (context, index) => _buildGridTile(_photos[index]),
+                    itemCount: photos.length,
+                    itemBuilder: (context, index) => _buildGridTile(photos[index]),
                   ),
           ),
         ],
@@ -317,18 +334,20 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
       child: Stack(
         fit: StackFit.expand,
         children: [
-          // 썸네일
-          if (photo.thumbnail.isNotEmpty)
-            Image.memory(
-              base64Decode(photo.thumbnail),
-              fit: BoxFit.cover,
-            )
-          else
-            Container(
-              color: Colors.grey[800],
-              child: const Icon(Icons.image, color: Colors.white38, size: 32),
-            ),
-          // 상태 오버레이 (done 제외 — done은 깔끔하게)
+          photo.thumbUrl.isNotEmpty
+              ? CachedNetworkImage(
+                  imageUrl: photo.thumbUrl,
+                  fit: BoxFit.cover,
+                  placeholder: (_, _) => Container(color: Colors.grey[800]),
+                  errorWidget: (_, _, _) => Container(
+                    color: Colors.grey[800],
+                    child: const Icon(Icons.image, color: Colors.white38, size: 32),
+                  ),
+                )
+              : Container(
+                  color: Colors.grey[800],
+                  child: const Icon(Icons.image, color: Colors.white38, size: 32),
+                ),
           if (photo.status != 'done')
             Positioned(
               right: 4,
@@ -390,7 +409,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
 
 class _PhotoItem {
   final String id;
-  final String thumbnail;
+  final String thumbUrl;
   final String uploadedByName;
   final int createdAt;
   final String status;
@@ -398,10 +417,21 @@ class _PhotoItem {
 
   _PhotoItem({
     required this.id,
-    required this.thumbnail,
+    required this.thumbUrl,
     required this.uploadedByName,
     required this.createdAt,
     required this.status,
     required this.size,
   });
+
+  factory _PhotoItem.fromMap(String id, Map<String, dynamic> info) {
+    return _PhotoItem(
+      id: id,
+      thumbUrl: info['thumbUrl'] as String? ?? '',
+      uploadedByName: info['uploadedByName'] as String? ?? '',
+      createdAt: info['createdAt'] as int? ?? 0,
+      status: info['status'] as String? ?? 'pending',
+      size: info['size'] as int? ?? 0,
+    );
+  }
 }

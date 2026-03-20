@@ -1,7 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:cached_network_image/cached_network_image.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
@@ -40,7 +40,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
 
   List<Map<String, dynamic>> _devices = [];
   Map<String, dynamic>? _callStatus;
-  List<Map<String, dynamic>> _recentPhotos = [];
+  final Map<String, Map<String, dynamic>> _photoMap = {};
   List<Map<String, dynamic>> _members = [];
   final List<StreamSubscription<DatabaseEvent>> _subs = [];
   bool _loading = true;
@@ -137,31 +137,44 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   }
 
   void _watchPhotos() {
-    final sub = _photoService.watchPhotoSync(widget.familyId).listen((event) {
-      final data = event.snapshot.value as Map?;
-      if (data == null) {
-        if (mounted) setState(() => _recentPhotos = []);
-        return;
+    // keepSynced: 화면 밖에서도 최신 상태 유지 → 재진입 시 즉시 표시
+    FirebaseDatabase.instance
+        .ref('families/${widget.familyId}/photoSync')
+        .keepSynced(true);
+
+    final addedSub = _photoService.onPhotoAdded(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      final value = event.snapshot.value;
+      if (id == null || value == null) return;
+      final info = Map<String, dynamic>.from(value as Map);
+      // done 상태 + thumbUrl 있는 것만 표시
+      if (info['thumbUrl'] != null &&
+          (info['status'] == 'done' || info['status'] == 'pending')) {
+        if (mounted) setState(() => _photoMap[id] = info);
       }
-
-      final photos = <Map<String, dynamic>>[];
-      for (final entry in data.entries) {
-        final info = Map<String, dynamic>.from(entry.value as Map);
-        info['id'] = entry.key;
-        // done 상태만 표시
-        if (info['status'] == 'done' && info['thumbnail'] != null) {
-          photos.add(info);
-        }
-      }
-
-      // 최신순 정렬, 최대 10장
-      photos.sort((a, b) =>
-          ((b['createdAt'] as num?) ?? 0).compareTo((a['createdAt'] as num?) ?? 0));
-      if (photos.length > 10) photos.removeRange(10, photos.length);
-
-      if (mounted) setState(() => _recentPhotos = photos);
     });
-    _subs.add(sub);
+
+    final changedSub = _photoService.onPhotoChanged(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      final value = event.snapshot.value;
+      if (id == null || value == null) return;
+      final info = Map<String, dynamic>.from(value as Map);
+      if (info['thumbUrl'] != null &&
+          (info['status'] == 'done' || info['status'] == 'pending')) {
+        if (mounted) setState(() => _photoMap[id] = info);
+      } else {
+        // deleted/expired 상태 → 목록에서 제거
+        if (mounted) setState(() => _photoMap.remove(id));
+      }
+    });
+
+    final removedSub = _photoService.onPhotoRemoved(widget.familyId).listen((event) {
+      final id = event.snapshot.key;
+      if (id == null) return;
+      if (mounted) setState(() => _photoMap.remove(id));
+    });
+
+    _subs.addAll([addedSub, changedSub, removedSub]);
   }
 
   Future<void> _loadMembers() async {
@@ -320,7 +333,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
                   const SizedBox(height: 20),
                   _buildActionButtons(),
                   const SizedBox(height: 24),
-                  if (_recentPhotos.isNotEmpty) ...[
+                  if (_photoMap.isNotEmpty) ...[
                     _buildRecentPhotos(),
                     const SizedBox(height: 24),
                   ],
@@ -514,6 +527,12 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   }
 
   Widget _buildRecentPhotos() {
+    // 최신순 정렬, 최대 10장
+    final photos = _photoMap.values.toList()
+      ..sort((a, b) =>
+          ((b['createdAt'] as num?) ?? 0).compareTo((a['createdAt'] as num?) ?? 0));
+    final recent = photos.length > 10 ? photos.sublist(0, 10) : photos;
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -538,11 +557,11 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
           height: 80,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
-            itemCount: _recentPhotos.length,
+            itemCount: recent.length,
             itemBuilder: (context, index) {
-              final photo = _recentPhotos[index];
-              final thumbStr = photo['thumbnail'] as String? ?? '';
-              if (thumbStr.isEmpty) return const SizedBox.shrink();
+              final photo = recent[index];
+              final thumbUrl = photo['thumbUrl'] as String? ?? '';
+              if (thumbUrl.isEmpty) return const SizedBox.shrink();
 
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
@@ -550,12 +569,18 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
                   onTap: _openPhotos,
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(8),
-                    child: Image.memory(
-                      base64Decode(thumbStr),
+                    child: CachedNetworkImage(
+                      imageUrl: thumbUrl,
                       width: 80,
                       height: 80,
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => Container(
+                      placeholder: (_, _) => Container(
+                        width: 80,
+                        height: 80,
+                        color: Colors.grey[800],
+                        child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+                      ),
+                      errorWidget: (_, _, _) => Container(
                         width: 80,
                         height: 80,
                         color: Colors.grey[800],

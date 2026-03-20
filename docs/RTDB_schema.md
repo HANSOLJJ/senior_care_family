@@ -135,16 +135,24 @@ Firebase RTDB
     │       ├── fileName: string
     │       ├── size: number
     │       ├── checksum: string
-    │       ├── storageUrl: string
-    │       ├── storagePath: string | null
+    │       ├── storageUrl: string              # 원본 임시 Storage URL (done 후 삭제)
+    │       ├── storagePath: string | null      # 원본 임시 Storage 경로
+    │       ├── thumbUrl: string                # 썸네일 Storage URL (영구)
+    │       ├── thumbPath: string               # 썸네일 Storage 경로 (삭제용)
     │       ├── uploadedBy: string
     │       ├── uploadedByName: string
     │       ├── createdAt: timestamp
-    │       ├── status: string                  # "pending"|"downloading"|"done"|"expired"|"deleted"
+    │       ├── status: string                  # "pending"|"done"|"expired"|"deleted"
     │       ├── retryCount: number
-    │       └── thumbnail: string               # base64 JPEG
+    │       └── downloadedBy/                   # 각 Senior 다운로드 완료 기록
+    │           └── {deviceId}: true
     │
     │   Writer: Family (업로드), Senior (상태 변경), Cloud Function (만료)
+    │   ※ thumbnail(base64) 필드 제거 → thumbUrl(Storage URL)로 교체
+    │   ※ Family 앱: onChildAdded/Changed/Removed 구독 (onValue 아님)
+    │   ※ Family 앱: setPersistenceEnabled(true) + keepSynced(true) 적용
+    │   ※   로컬 SQLite 캐시: /data/data/com.seniorcare.family/databases/
+    │   ※ Senior 앱: ChildEventListener 사용 (변경된 항목만 수신)
     │
     ├── reminders/
     │   └── {reminderId}/
@@ -214,7 +222,9 @@ Firebase RTDB
 ```text
 families/
   {familyId}/
-    temp/                                       # 사진 임시 버퍼
+    temp/                                       # 사진 원본 임시 버퍼 (Senior 다운로드 후 삭제)
+      {photoId}.jpg
+    thumbs/                                     # 사진 썸네일 영구 저장 (400×400px, ~100KB)
       {photoId}.jpg
     reminders/
       {reminderId}/
@@ -270,11 +280,15 @@ Step 5: 고아 유저 참조 정리
 ### 사진 전송 라이프사이클
 
 ```text
-Family 업로드     → storagePath 생성, status: "pending"
-Senior 수신 시작  → status: "downloading"
-Senior 저장 완료  → status: "done"
-Family 정리       → Storage 파일 삭제, storagePath 필드 제거
-만료 (7일)       → status: "expired" (Cloud Function, Storage 삭제)
+Family 업로드     → 원본: families/{fid}/temp/{photoId}.jpg (임시)
+                  → 썸네일: families/{fid}/thumbs/{photoId}.jpg (영구, 400×400px)
+                  → RTDB: thumbUrl + status: "pending"
+Senior 저장 완료  → downloadedBy/{deviceId}: true
+Cloud Function    → 모든 Senior 완료 → temp Storage 삭제 + status: "done"
+                  → thumbPath/storagePath 필드 제거 (thumbUrl은 유지)
+만료 (7일)       → status: "expired" + temp Storage 삭제 (Cloud Function)
+                  → thumbs Storage도 삭제
 RTDB 정리 (37일) → RTDB 항목 완전 삭제 (Cloud Function)
 Family 삭제 요청  → status: "deleted" → Senior 로컬 파일 삭제
+                  → Cloud Function: thumbs Storage 삭제
 ```

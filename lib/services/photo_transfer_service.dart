@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
@@ -40,20 +39,20 @@ class PhotoTransferService {
     if (compressed == null) throw Exception('이미지 압축 실패');
     print('압축 완료: ${imageFile.lengthSync()} → ${compressed.length} bytes');
 
-    // 2. 썸네일 생성 (200×200, JPEG 75%, base64 ~4-5KB)
+    // 2. 썸네일 생성 (400×400, JPEG 80%, ~100KB) → Storage 영구 저장
     final thumbBytes = await FlutterImageCompress.compressWithFile(
       imageFile.absolute.path,
-      minWidth: 200,
-      minHeight: 200,
-      quality: 75,
+      minWidth: 400,
+      minHeight: 400,
+      quality: 80,
       format: CompressFormat.jpeg,
     );
-    final thumbnail = thumbBytes != null ? base64Encode(thumbBytes) : '';
+    if (thumbBytes == null) throw Exception('썸네일 생성 실패');
 
     // 3. MD5 체크섬
     final checksum = md5.convert(compressed).toString();
 
-    // 4. Storage 업로드
+    // 4. 원본 Storage 업로드 (임시 버퍼)
     final storagePath = 'families/$familyId/temp/$fileName';
     final ref = _storage.ref(storagePath);
     final uploadTask = ref.putData(
@@ -61,19 +60,29 @@ class PhotoTransferService {
       SettableMetadata(contentType: 'image/jpeg'),
     );
 
-    // 진행률 콜백
     uploadTask.snapshotEvents.listen((snapshot) {
       if (snapshot.totalBytes > 0) {
         final progress = snapshot.bytesTransferred / snapshot.totalBytes;
-        onProgress?.call(progress);
+        onProgress?.call(progress * 0.8); // 원본 업로드 80%까지
       }
     });
 
     await uploadTask;
     final downloadUrl = await ref.getDownloadURL();
-    print('Storage 업로드 완료: $storagePath');
+    print('Storage 원본 업로드 완료: $storagePath');
 
-    // 5. RTDB 메타데이터 등록
+    // 5. 썸네일 Storage 업로드 (영구 저장)
+    final thumbPath = 'families/$familyId/thumbs/$photoId.jpg';
+    final thumbRef = _storage.ref(thumbPath);
+    await thumbRef.putData(
+      Uint8List.fromList(thumbBytes),
+      SettableMetadata(contentType: 'image/jpeg'),
+    );
+    final thumbUrl = await thumbRef.getDownloadURL();
+    onProgress?.call(1.0);
+    print('Storage 썸네일 업로드 완료: $thumbPath (${thumbBytes.length} bytes)');
+
+    // 6. RTDB 메타데이터 등록
     final uploadedByName = user.displayName ?? '가족';
     final label = '$fileName (pending, $uploadedByName)';
     await _db.ref('families/$familyId/photoSync/$photoId').set({
@@ -83,14 +92,15 @@ class PhotoTransferService {
       'checksum': checksum,
       'storageUrl': downloadUrl,
       'storagePath': storagePath,
+      'thumbUrl': thumbUrl,
+      'thumbPath': thumbPath,
       'uploadedBy': user.uid,
       'uploadedByName': uploadedByName,
       'createdAt': ServerValue.timestamp,
       'status': 'pending',
       'retryCount': 0,
-      'thumbnail': thumbnail,
     });
-    print('RTDB 메타 등록: photoSync/$photoId status=pending');
+    print('RTDB 메타 등록: photoSync/$photoId status=pending, thumbUrl=$thumbUrl');
 
     return photoId;
   }
@@ -104,8 +114,15 @@ class PhotoTransferService {
   // Storage 삭제는 Cloud Function(onPhotoDownloaded)이 담당.
   // Family 앱에서 직접 삭제하지 않음.
 
-  /// 보낸 사진 목록 실시간 스트림
-  Stream<DatabaseEvent> watchPhotoSync(String familyId) {
-    return _db.ref('families/$familyId/photoSync').onValue;
-  }
+  /// 사진 추가 스트림 (onChildAdded — 기존 항목 replay + 신규 추가)
+  Stream<DatabaseEvent> onPhotoAdded(String familyId) =>
+      _db.ref('families/$familyId/photoSync').onChildAdded;
+
+  /// 사진 변경 스트림 (status 변경 등)
+  Stream<DatabaseEvent> onPhotoChanged(String familyId) =>
+      _db.ref('families/$familyId/photoSync').onChildChanged;
+
+  /// 사진 제거 스트림
+  Stream<DatabaseEvent> onPhotoRemoved(String familyId) =>
+      _db.ref('families/$familyId/photoSync').onChildRemoved;
 }
