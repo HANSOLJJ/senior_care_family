@@ -140,14 +140,14 @@ families/{familyId}/
     uploadedBy: string          # userId
     uploadedByName: string      # "딸"
     createdAt: timestamp
-    status: string              # "pending" | "done" | "expired" | "deleted"
+    status: string              # "pending" | "done" | "expired"
     retryCount: number          # 실패 시 증가
     downloadedBy/               # 각 Senior 다운로드 완료 기록
       {deviceId}: true
 
 ※ thumbnail(base64) 필드 없음 → thumbUrl(Storage URL)로 대체
-※ Family 앱은 onChildAdded/Changed/Removed로 구독 (onValue 사용하지 않음)
-※ 앱 재시작 시 onChildAdded가 기존 항목 replay + RTDB offline persistence 로컬 캐시
+※ Family 앱은 onValue로 구독 (전체 스냅샷 → 오프라인 삭제도 재연결 시 자동 reconcile)
+※ Senior 앱은 ValueEventListener + setPersistenceEnabled(true) → 재연결 시 delta sync
 ```
 
 ### 알림
@@ -260,15 +260,17 @@ sequenceDiagram
     participant R as RTDB
     participant Sr as Senior 태블릿 (모든 기기)
 
-    F->>R: status: "deleted"
-    Sr->>R: 감지 (onDataChange)
-    Sr->>Sr: 로컬 사진 파일 삭제
-    Note over R: Storage는 이미 삭제됨 (done 시점에)
-    Note over R: RTDB 노드는 와치독이 37일 후 정리
+    F->>R: photoSync/{photoId} 즉시 remove()
+    Note over R: RTDB 노드 즉시 사라짐
+    Sr->>R: 재연결 시 onDataChange 발동 (ValueEventListener + persistence)
+    Sr->>Sr: RTDB 목록 vs 로컬 비교 → 고아 파일 삭제
+    CF->>R: 트리거: onPhotoDeleted (onDelete)
+    CF->>S: 썸네일 Storage 삭제
 ```
 
-- Family는 RTDB `status`만 변경 — Storage 직접 삭제 안 함
-- 모든 Senior가 각자 감지해서 로컬 파일 삭제
+- Family는 RTDB 노드 즉시 remove() — Storage 직접 삭제 안 함
+- Senior가 온라인이면 즉시, 오프라인이면 재연결 시 reconcile로 로컬 파일 삭제
+- Cloud Function(onPhotoDeleted, onDelete 트리거)이 썸네일 Storage 삭제
 
 ---
 
@@ -338,10 +340,8 @@ stateDiagram-v2
 
     expired --> pending: Family 재전송
 
-    done --> deleted: Family 삭제 요청
-    expired --> deleted: Family 삭제 요청
-
-    deleted --> [*]: Senior 로컬 삭제 완료
+    done --> [*]: Family 삭제 요청 (RTDB 노드 즉시 remove)
+    expired --> [*]: Family 삭제 요청 (RTDB 노드 즉시 remove)
 ```
 
 | status | 누가 씀 | 설명 |
@@ -349,7 +349,6 @@ stateDiagram-v2
 | `pending` | Family | 업로드 완료, Senior 다운로드 대기 |
 | `done` | Cloud Function | 모든 Senior의 downloadedBy 확인 후 설정 |
 | `expired` | Cloud Function | 7일 경과 미수신 (와치독) |
-| `deleted` | Family | 삭제 요청 |
 
 ※ `downloading` 상태는 더 이상 사용하지 않음 — 복수 Senior 동시 다운로드를 위해
 ※ 각 Senior의 다운로드 상태는 `downloadedBy/{deviceId}: true`로 개별 추적
@@ -370,7 +369,6 @@ stateDiagram-v2
 | `pending` | `Icons.schedule` | 회색 | 대기 중 (2/3 수신) | - |
 | `done` | `Icons.check_circle` | 초록 | 완료 | 삭제 가능 |
 | `expired` | `Icons.error_outline` | 빨강 | 만료 | 재전송 버튼 |
-| `deleted` | - | - | 목록에서 제거 | - |
 
 ※ pending 상태에서 `downloadedBy` 수를 표시하여 수신 진행률 확인 가능
 
@@ -381,7 +379,7 @@ stateDiagram-v2
 | 함수명 | 트리거 | 역할 |
 | ------ | ------ | ---- |
 | `onPhotoAllDownloaded` | RTDB `downloadedBy/{did}` write | 모든 Senior 다운로드 완료 → 원본 Storage 삭제 + status: done (thumbs는 유지) |
-| `onPhotoDeleted` | RTDB `photoSync/{photoId}/status` update | status→deleted 즉시 → 썸네일 Storage 삭제 (1:N Family 구조 일관 처리) |
+| `onPhotoDeleted` | RTDB `photoSync/{photoId}` onDelete | photoSync 노드 삭제 → 썸네일 Storage 삭제 |
 | `onReminderMediaDownloaded` | RTDB `mediaDownloaded` update | targetDevice 다운로드 완료 → Storage 삭제 |
 | `onReminderDeleted` | RTDB `reminders/{rid}` delete | 알림 삭제 → Storage 파일 삭제 |
 | `cleanupExpiredPhotos` | 스케줄 6시간 | 만료/done 정리 + thumbPath도 함께 삭제 |
@@ -451,17 +449,17 @@ stateDiagram-v2
 - 온라인 복귀 시 변경분만 sync (전체 재수신 없음)
 - 기본 캐시 크기: 10MB (photoSync는 URL만이라 ~0.5MB 수준)
 
-**`keepSynced(true)`** — `family_detail_screen.dart` initState에서 familyId 확정 후 호출
-- `families/{fid}/photoSync` 노드를 앱 실행 중 항상 최신 상태로 유지
-- 화면 재진입 시 로컬 캐시에서 즉시 표시 + 변경분만 수신
-- 앱 재시작 시 `onChildAdded`가 기존 항목 모두 replay → 기기 캐시 이미지와 결합해 즉시 표시
+**`onValue` 구독** — Family: `photo_transfer_service.dart watchPhotoSync()` / Senior: `ValueEventListener`
+- 전체 스냅샷 수신 → 화면 상태 = RTDB 현재 상태 (자동 reconcile)
+- persistence delta sync: 실제 네트워크 전송은 변경분만 (onChild와 비용 동일)
+- 오프라인 중 삭제된 항목도 재연결 시 자동 반영 (onChildRemoved 유실 없음)
 
-| 상황        | persistence 없음                  | persistence + keepSynced  |
+| 상황        | persistence 없음 + onChild        | persistence + onValue     |
 | ----------- | --------------------------------- | ------------------------- |
-| 앱 재시작   | onChildAdded replay 기다려야 표시 | 로컬 캐시에서 즉시 표시   |
+| 앱 재시작   | replay 기다려야 표시              | 로컬 캐시에서 즉시 표시   |
 | 화면 재진입 | 다시 구독 → 전체 replay           | 즉시 표시                 |
 | 오프라인    | 빈 화면                           | 마지막 상태 표시          |
-| 온라인 복귀 | 전체 replay                       | 변경분만 sync             |
+| 온라인 복귀 | onChildRemoved 유실 가능          | delta sync → 자동 reconcile |
 
 ---
 
@@ -478,23 +476,156 @@ stateDiagram-v2
 ## 오프라인 대응
 
 1. Family 앱: Storage 업로드 + RTDB pending 등록 → 앱 꺼도 OK
-2. Senior 오프라인: 다음 온라인 시 RTDB에서 pending 목록 자동 감지 → 다운로드
+2. Senior 오프라인: 재연결 시 delta sync → `onDataChange` 발동 → pending 다운로드 + 삭제 reconcile
 3. 7일 초과 미수신: Cloud Function이 Storage 삭제 + status: "expired"
 4. Family에서 재전송 버튼으로 다시 업로드 가능
 
-### 오프라인 중 삭제 처리 (persistence + onValue)
+→ 상세 시나리오는 **동기화 시나리오** 섹션 참조
 
-Family가 사진 삭제 → RTDB 노드 즉시 remove() → Senior가 오프라인이어도 OK:
+---
 
-- `setPersistenceEnabled(true)`: 재연결 시 delta sync → `onDataChange` 발동
-- `onDataChange`에서 RTDB 파일 목록 vs 로컬 파일 비교 → 고아 파일 삭제
-- persistence 캐시(SQLite)에서 즉시 표시 → 서버 sync 후 reconcile
+## 동기화 시나리오
 
-| 상황 | 처리 |
-| ---- | ---- |
-| Senior 온라인 중 삭제 | onDataChange 즉시 발동 → 로컬 파일 삭제 |
-| Senior 오프라인 중 삭제 | 재연결 시 onDataChange 발동 → 로컬 파일 삭제 |
-| 앱 재시작 | persistence 캐시 → 즉시 표시 → 서버 sync |
+### 공통 구조
+
+| 대상 | 구독 방식 | persistence |
+| ---- | --------- | ----------- |
+| Family 앱 | `onValue` (watchPhotoSync) | `setPersistenceEnabled(true)` (main.dart) |
+| Senior 앱 | `ValueEventListener` (PhotoReceiver, ReminderManager) | `setPersistenceEnabled(true)` (MainActivity.onCreate) |
+
+- **onValue / ValueEventListener**: 항상 전체 스냅샷 → RTDB 현재 상태 = 화면/로컬 상태 자동 일치
+- **persistence delta sync**: 재연결 시 변경분만 수신 → onChild와 네트워크 비용 동일
+
+---
+
+### 사진 추가 — Senior 온라인
+
+```mermaid
+sequenceDiagram
+    participant F as Family 앱
+    participant S as Storage
+    participant R as RTDB
+    participant Sr as Senior (온라인)
+
+    F->>S: 원본 + 썸네일 업로드
+    F->>R: photoSync/{id} (status:pending, thumbUrl)
+    R-->>Sr: onDataChange 즉시 발동
+    Sr->>Sr: pending + downloadedBy 없음 확인
+    Sr->>S: 원본 다운로드
+    Sr->>Sr: MD5 검증 + 로컬 저장
+    Sr->>R: downloadedBy/{deviceId}: true
+    R-->>F: onValue → photoMap 갱신 (썸네일 표시)
+```
+
+### 사진 추가 — Senior 오프라인
+
+```mermaid
+sequenceDiagram
+    participant F as Family 앱
+    participant S as Storage
+    participant R as RTDB
+    participant Sr as Senior (오프라인→온라인)
+
+    F->>S: 원본 + 썸네일 업로드
+    F->>R: photoSync/{id} (status:pending)
+    Note over Sr: WiFi 끊김 — RTDB 변경 미수신
+
+    Note over Sr: WiFi 재연결
+    R-->>Sr: onDataChange (delta sync — 변경분만)
+    Sr->>Sr: pending + downloadedBy 없음 확인
+    Sr->>S: 원본 다운로드
+    Sr->>R: downloadedBy/{deviceId}: true
+```
+
+### 사진 삭제 — Senior 온라인
+
+```mermaid
+sequenceDiagram
+    participant FA as Family A
+    participant R as RTDB
+    participant CF as Cloud Function
+    participant S as Storage
+    participant Sr as Senior (온라인)
+    participant FB as Family B
+
+    FA->>R: photoSync/{id}.remove()
+    R-->>Sr: onDataChange 즉시 발동
+    Sr->>Sr: RTDB 목록 vs 로컬 비교
+    Sr->>Sr: 고아 파일 삭제 → 슬라이드쇼에서 제거
+    CF->>S: 썸네일 Storage 삭제 (onPhotoDeleted 트리거)
+    R-->>FB: onValue → photoMap 갱신 (해당 사진 제거)
+```
+
+### 사진 삭제 — Senior 오프라인
+
+```mermaid
+sequenceDiagram
+    participant FA as Family A
+    participant R as RTDB
+    participant Sr as Senior (오프라인→온라인)
+    participant FB as Family B
+
+    FA->>R: photoSync/{id}.remove()
+    Note over R: RTDB 노드 즉시 제거됨
+    Note over Sr: WiFi 끊김 — 삭제 미감지
+
+    R-->>FB: onValue → photoMap 즉시 갱신 (Family B도 사진 제거)
+
+    Note over Sr: WiFi 재연결
+    R-->>Sr: onDataChange (delta sync)
+    Note over Sr: 스냅샷에 해당 id 없음
+    Sr->>Sr: RTDB 목록 vs 로컬 비교 → 고아 파일 삭제
+    Note over Sr: 슬라이드쇼에서 제거
+```
+
+### 알림 추가 — Senior 온라인/오프라인
+
+```mermaid
+sequenceDiagram
+    participant F as Family 앱
+    participant S as Storage
+    participant R as RTDB
+    participant Sr as Senior
+
+    F->>S: 미디어 업로드 (reminders/{rid}/media.mp4)
+    F->>R: reminders/{rid} 등록 (mediaDownloaded:false)
+
+    alt Senior 온라인
+        R-->>Sr: onDataChange 즉시 발동
+    else Senior 오프라인
+        Note over Sr: WiFi 재연결
+        R-->>Sr: onDataChange (delta sync)
+    end
+
+    Sr->>Sr: targetDeviceId 일치 + mediaDownloaded:false 확인
+    Sr->>S: 미디어 다운로드
+    Sr->>Sr: 로컬 저장 + AlarmManager 등록
+    Sr->>R: mediaDownloaded: true
+```
+
+### 알림 삭제 — Senior 온라인/오프라인
+
+```mermaid
+sequenceDiagram
+    participant F as Family 앱
+    participant R as RTDB
+    participant CF as Cloud Function
+    participant S as Storage
+    participant Sr as Senior
+
+    F->>R: reminders/{rid}.remove()
+    CF->>S: Storage 미디어 삭제 (onReminderDeleted 트리거)
+
+    alt Senior 온라인
+        R-->>Sr: onDataChange 즉시 발동
+    else Senior 오프라인
+        Note over Sr: WiFi 재연결
+        R-->>Sr: onDataChange (delta sync)
+    end
+
+    Sr->>Sr: 이전 알림 ID 목록 vs 현재 비교
+    Sr->>Sr: 제거된 알림: AlarmManager 취소 + 로컬 미디어 삭제
+```
 
 ---
 

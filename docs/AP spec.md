@@ -69,6 +69,35 @@ UNISOC T606 (A75 big코어) ≈ Snapdragon 662 (A73 big코어) ≈ A523 (8xA55) 
 - ML Kit 얼굴감지가 실사용 불가 수준으로 느릴 가능성 높음
 - 얼굴감지 OFF로 운용할 경우 슬라이드쇼 + 영상통화만은 가능할 수 있음
 
+## 실제 기기 Audio Effects 분석
+
+### KEP2024120921 (MediaTek 계열, `serial: KEP2024120921`)
+
+`/vendor/etc/audio_effects.xml` 분석 결과:
+
+| 항목 | 내용 |
+| --- | --- |
+| **칩셋 계열** | MediaTek (MTK) — `libaudiopreprocessing_mtk.so` 확인 |
+| **Audio HAL 버전** | `android.hardware.audio.effect@6.0` |
+| **AEC** | OK — uuid: `9f35ed76-0b66-4330-8f79-e39ca266dc7c` (MTK 전용) |
+| **NS** | OK — uuid: `300abe9f-dfc5-4340-9c4b-79ef1be4e651` |
+| **AGC** | OK — uuid: `3387eb70-9896-4338-90f5-b2de883864c9` |
+| **voice_communication 적용** | AEC + NS + AGC 모두 활성화 |
+
+- SM-T500(Snapdragon 662, Qualcomm 자체 구현)과 달리 MTK 전용 `libaudiopreprocessing_mtk.so` 사용
+- AEC UUID가 AOSP 기본값(`bb392ec0-...`)과 다름 → MTK 하드웨어 가속 AEC
+- `voice_communication` 스트림에 3가지 전처리 모두 적용 → 영상통화 음질 양호 예상
+
+### SM-T500 (Snapdragon 662, Qualcomm)
+
+별도 `audio_effects.xml` 미확인 — Qualcomm 기본 구현 사용.
+
+### A20 (Allwinner A523)
+
+별도 `audio_effects.xml` 미확인.
+
+---
+
 ## 참고 자료
 
 - [UNISOC T606 Specs - NotebookCheck](https://www.notebookcheck.net/Unisoc-Tiger-T7200-T606-Processor-Benchmarks-and-Specs.582689.0.html)
