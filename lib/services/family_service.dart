@@ -71,11 +71,6 @@ class FamilyService {
     return data.keys.cast<String>().toList();
   }
 
-  /// 가족 그룹의 기기 목록 (실시간 스트림)
-  Stream<DatabaseEvent> watchFamilyDevices(String familyId) {
-    return _db.ref('families/$familyId/devices').onValue;
-  }
-
   /// 가족 그룹의 멤버 목록
   Future<List<Map<String, dynamic>>> getFamilyMembers(String familyId) async {
     final snap = await _db.ref('families/$familyId/members').get();
