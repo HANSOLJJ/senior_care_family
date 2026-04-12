@@ -1,5 +1,7 @@
 # Cloud Functions 만료 처리 — 테스트 기록
 
+> **[HISTORICAL]** 2026-03-11 시점의 1회성 검증 기록. 현재 동작 상태와 다를 수 있습니다.
+
 Function URL (naverCallback(us-central1)): https://us-central1-dcom-smart-frame.cloudfunctions.net/naverCallback
 Function URL (cleanupExpiredPhotosManual(us-central1)): https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupExpiredPhotosManual
 

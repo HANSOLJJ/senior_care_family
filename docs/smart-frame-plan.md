@@ -1,5 +1,8 @@
 # Senior Care Family App - 구현 계획
 
+> **[HISTORICAL]** 이 문서는 초기 설계 단계의 Phase 1~7 로드맵입니다.
+> 현재 진행 상태는 [CLAUDE.md](../CLAUDE.md) 또는 [to_do.md](to_do.md)를 참고하세요.
+
 ## 개요
 
 Senior Care 시스템의 가족(자식)용 앱.

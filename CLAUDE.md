@@ -63,9 +63,7 @@ lib/
 │   ├── pairing_screen.dart                # 페어링 코드 입력
 │   ├── device_list_screen.dart            # 홈 (가족별 기기 목록)
 │   ├── family_detail_screen.dart          # 가족 상세 (기기 상태, 사진, 알림)
-│   ├── outgoing_call_screen.dart          # 발신 + 영상통화
-│   ├── video_call_screen.dart             # 영상통화
-│   ├── monitoring_screen.dart             # CCTV 모니터링
+│   ├── monitoring_screen.dart             # CCTV 모니터링 + 양방향 통화 (callType 파라미터)
 │   ├── photo_upload_screen.dart           # 사진 업로드
 │   └── reminder/
 │       ├── reminder_list_screen.dart      # 알림 목록
@@ -145,6 +143,7 @@ firebase deploy --only functions
 | `kakaoCustomToken` | HTTP | 카카오 로그인 → Firebase Custom Token |
 | `naverCustomToken` | HTTP | 네이버 로그인 → Firebase Custom Token |
 | `onPhotoDownloaded` | RTDB `downloadedBy/{did}` create | 모든 Senior 다운로드 완료 → Storage 삭제 + status: done |
+| `onPhotoDeleted` | RTDB `photoSync/{photoId}` delete | photoSync 노드 삭제 → 썸네일 Storage 즉시 삭제 |
 | `onReminderMediaDownloaded` | RTDB `mediaDownloaded` update | targetDevice 다운로드 완료 → Storage 삭제 |
 | `onReminderDeleted` | RTDB `reminders/{rid}` delete | 알림 삭제 → Storage 파일 삭제 |
 | `cleanupExpiredPhotos` | 스케줄 6시간 | 만료 사진 정리 |

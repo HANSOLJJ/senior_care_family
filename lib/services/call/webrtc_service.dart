@@ -4,6 +4,10 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../config/app_config.dart';
 import 'signaling_service.dart';
 
+/// ICE 서버 설정 — STUN(Google) + TURN(metered.ca)
+///
+/// NAT/방화벽 환경에서 P2P 연결을 위해 STUN으로 공인 IP 확인,
+/// STUN 실패 시 TURN 릴레이 서버를 통해 미디어 중계.
 const _iceServers = {
   'iceServers': [
     {'urls': 'stun:stun.l.google.com:19302'},
@@ -26,33 +30,98 @@ const _iceServers = {
   ],
 };
 
-/// WebRTC 피어 연결 + 미디어 스트림 관리
+/// (`Service`) WebRTC 피어 연결 + 미디어 스트림 관리
+///
+/// Family 앱에서 Senior 기기로 영상통화/모니터링을 발신하는 핵심 서비스.
+/// SignalingService를 통해 RTDB로 SDP/ICE를 교환하고,
+/// PeerConnection으로 실시간 영상/음성 스트림을 송수신.
+///
+/// 주요 메서드:
+///   - [makeCall] — 양방향 영상통화 발신: offer 생성 → RTDB 전송 → answer 대기 → ICE 교환
+///   - [startMonitoring] — CCTV 모니터링 발신: 단방향(Senior→Family 영상만, RecvOnly)
+///   - [startCall] — 통화 발신 (RecvOnly 시작 → Senior 수락 후 양방향 전환)
+///   - [upgradeToCall] — 모니터링 → 양방향 통화 전환 (SDP renegotiation)
+///   - [hangUp] — 통화 종료: 미디어/PeerConnection 정리 + RTDB status="ended"
+///
+/// 끊김 감지: connectionState DISCONNECTED 시 5초 대기 후 복구 안 되면 자동 종료
 class WebRtcService {
+  // ─── 의존성 ───
+
+  /// RTDB 시그널링 서비스 (SDP/ICE 교환 담당)
   final SignalingService _signaling;
+
+  // ─── WebRTC 핵심 객체 ───
+
+  /// RTCPeerConnection 인스턴스 (연결당 1개)
   RTCPeerConnection? _peerConnection;
+
+  /// 로컬 카메라/마이크 미디어 스트림
   MediaStream? _localStream;
+
+  /// 원격(Senior) 미디어 스트림
   MediaStream? _remoteStream;
+
+  // ─── 상태 필드 ───
+
+  /// 현재 활성 통화 ID
   String? _callId;
+
+  /// hangUp 중복 호출 방지 플래그
   bool _isHungUp = false;
+
+  /// 현재 모니터링(RecvOnly) 모드인지 여부
   bool _isMonitoring = false;
+
+  // ─── 타이머 / 구독 ───
+
+  /// 연결 끊김 감지 후 5초 대기 타이머
   Timer? _disconnectTimer;
+
+  /// AEC(에코 제거) 메트릭 로깅 타이머 (5초 간격)
   Timer? _aecStatsTimer;
+
+  /// Senior 수락 감지용 RTDB 구독 (`calls/{callId}/seniorAccepted`)
   StreamSubscription? _seniorAcceptedSub;
 
-  /// 상대방 끊김 감지 시 호출되는 콜백
+  // ─── 콜백 ───
+
+  /// 상대방 끊김/연결 실패 감지 시 호출되는 콜백
   void Function()? onCallEnded;
 
+  // ─── 렌더러 ───
+
+  /// 로컬 카메라 영상 렌더러 (PIP 표시용)
   final RTCVideoRenderer localRenderer = RTCVideoRenderer();
+
+  /// 원격(Senior) 영상 렌더러 (전체화면 표시용)
   final RTCVideoRenderer remoteRenderer = RTCVideoRenderer();
 
+  // ─── 생성자 ───
+
+  /// (`Factory`) WebRtcService 생성
+  ///
+  /// - **Params**:
+  ///   - [_signaling] — RTDB 시그널링 서비스 인스턴스
   WebRtcService(this._signaling);
 
+  // ─── 초기화 ───
+
+  /// (`Method`, async) 비디오 렌더러 초기화
+  ///
+  /// localRenderer와 remoteRenderer를 사용 가능 상태로 준비.
+  /// - **Side Effects**: 렌더러 초기화
+  /// - **호출**: MonitoringScreen._startMonitoring, _startCall
   Future<void> initialize() async {
     await localRenderer.initialize();
     await remoteRenderer.initialize();
   }
 
-  /// 로컬 미디어 스트림 획득
+  // ─── 미디어 스트림 ───
+
+  /// (`Method`, async) 로컬 미디어 스트림 획득 — 카메라(전면) + 마이크
+  ///
+  /// - **Returns**: `MediaStream` — 로컬 카메라/마이크 스트림 (1280x720)
+  /// - **호출**: [_createPc], [makeCall], [upgradeToCall], [_startLocalPreviewOnly]
   Future<MediaStream> _getLocalStream() async {
     return await navigator.mediaDevices.getUserMedia({
       'audio': true,
@@ -64,7 +133,18 @@ class WebRtcService {
     });
   }
 
-  /// PeerConnection 공통 설정
+  // ─── PeerConnection 생성 ───
+
+  /// (`Method`, async) PeerConnection 공통 설정 — 로컬 트랙 추가 + 이벤트 핸들러 등록
+  ///
+  /// 로컬 스트림의 모든 트랙을 PC에 추가하고, 원격 트랙 수신/ICE candidate 전송/
+  /// 연결 상태 감시 콜백을 설정. 양방향 통화(makeCall, answerCall)에서 사용.
+  /// - **Params**:
+  ///   - [callId] — 통화 ID (ICE candidate 전송 경로)
+  ///   - [myCandidatesPath] — 내 ICE candidate RTDB 경로 (`"callerCandidates"` 또는 `"calleeCandidates"`)
+  /// - **Returns**: `RTCPeerConnection` — 설정 완료된 PeerConnection
+  /// - **Side Effects**: 비트레이트 설정 (4Mbps), 원격 스트림 수신 시 remoteRenderer 연결
+  /// - **호출**: [answerCall]
   Future<RTCPeerConnection> _createPc(String callId, {required String myCandidatesPath}) async {
     final pc = await createPeerConnection(_iceServers);
 
@@ -119,7 +199,16 @@ class WebRtcService {
     return pc;
   }
 
-  /// 비디오 sender의 maxBitrate를 설정 (화질 개선)
+  // ─── 비트레이트 설정 ───
+
+  /// (`Utility`, async) 비디오 sender의 maxBitrate 설정 (화질 개선)
+  ///
+  /// degradationPreference를 MAINTAIN_RESOLUTION으로 설정하여 해상도 유지 우선.
+  /// - **Params**:
+  ///   - [pc] — 대상 PeerConnection
+  ///   - [maxBitrateKbps] — 최대 비트레이트 (kbps)
+  /// - **Side Effects**: sender의 encoding 파라미터 변경 (min=1Mbps, max=지정값)
+  /// - **호출**: [_createPc], [makeCall], [startCall], [upgradeToCall]
   Future<void> _setVideoBitrate(RTCPeerConnection pc, int maxBitrateKbps) async {
     final senders = await pc.getSenders();
     for (final sender in senders) {
@@ -137,7 +226,20 @@ class WebRtcService {
     }
   }
 
-  /// 수신 처리: offer를 받아 answer를 보내고 연결
+  // ─── 수신 처리 ───
+
+  /// (`Method`, async) 수신 처리 — offer를 받아 answer를 보내고 연결
+  ///
+  /// Senior 앱에서 사용하는 메서드. Family 앱에서는 직접 호출하지 않음.
+  /// 1. 로컬 미디어 스트림 획득
+  /// 2. PeerConnection 생성 (calleeCandidates 경로)
+  /// 3. Remote offer 설정 → Answer 생성 → 시그널링 전송
+  /// 4. 발신자 ICE candidates 감시 + 종료 감시
+  /// - **Params**:
+  ///   - [callId] — 수신한 통화 ID
+  ///   - [offer] — 발신자의 SDP offer (`{sdp, type}`)
+  /// - **Side Effects**: PeerConnection 생성, 로컬/원격 스트림 연결, AEC 모니터링 시작
+  /// - **호출**: Senior 앱 수신 로직
   Future<void> answerCall(String callId, Map<String, dynamic> offer) async {
     _isHungUp = false;
     _callId = callId;
@@ -189,7 +291,14 @@ class WebRtcService {
     _startAecStats();
   }
 
-  /// AEC 메트릭 로깅 시작 (5초 간격)
+  // ─── AEC 모니터링 ───
+
+  /// (`Utility`) AEC(에코 제거) 메트릭 로깅 시작 (5초 간격)
+  ///
+  /// PeerConnection의 getStats()로 ERL/ERLE, audioLevel 등을 추출하여 콘솔에 출력.
+  /// 에코 문제 디버깅용.
+  /// - **Side Effects**: _aecStatsTimer 시작 (5초 주기)
+  /// - **호출**: [answerCall], [makeCall], [startCall]
   void _startAecStats() {
     _aecStatsTimer?.cancel();
     _aecStatsTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
@@ -210,12 +319,32 @@ class WebRtcService {
     });
   }
 
+  /// (`Utility`) AEC 메트릭 로깅 중지
+  ///
+  /// - **Side Effects**: _aecStatsTimer 취소 및 null 처리
+  /// - **호출**: [hangUp]
   void _stopAecStats() {
     _aecStatsTimer?.cancel();
     _aecStatsTimer = null;
   }
 
-  /// 발신 처리: offer를 생성하여 전송하고 answer를 기다림
+  // ─── 발신 처리 ───
+
+  /// (`Method`, async) 양방향 영상통화 발신 — offer 생성 → RTDB 전송 → answer 대기
+  ///
+  /// 1. 로컬 미디어 스트림 획득 + 렌더러 연결
+  /// 2. PeerConnection 생성 (ICE candidate 큐 방식 — callId 확정 전 수집)
+  /// 3. SDP offer 생성 + 시그널링 서버에 통화 생성
+  /// 4. 큐에 쌓인 ICE candidate 일괄 전송
+  /// 5. 수신자 answer/ICE candidates/종료 감시
+  /// - **Params**:
+  ///   - [targetDeviceId] — 수신 대상 Senior 기기 ID
+  ///   - [callerUid] — 발신자 Firebase UID
+  ///   - [callerName] — 발신자 표시 이름
+  ///   - [familyId] — 소속 가족 그룹 ID
+  /// - **Returns**: `String` — 생성된 callId
+  /// - **Side Effects**: PeerConnection 생성, 로컬/원격 스트림 연결, AEC 모니터링 시작
+  /// - **호출**: (현재 미사용 — startCall로 대체됨)
   Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     print('WebRTC: 발신 시작 → target=$targetDeviceId');
@@ -345,7 +474,20 @@ class WebRtcService {
     return callId;
   }
 
-  /// 모니터링 발신: recvonly (카메라/마이크 OFF, Senior 영상만 수신)
+  // ─── 모니터링 발신 ───
+
+  /// (`Method`, async) CCTV 모니터링 발신 — RecvOnly (카메라/마이크 OFF, Senior 영상만 수신)
+  ///
+  /// 로컬 미디어 없이 RecvOnly transceiver로 Senior 영상/음성만 수신.
+  /// 연결 후 [upgradeToCall]로 양방향 전환 가능.
+  /// - **Params**:
+  ///   - [targetDeviceId] — 수신 대상 Senior 기기 ID
+  ///   - [callerUid] — 발신자 Firebase UID
+  ///   - [callerName] — 발신자 표시 이름
+  ///   - [familyId] — 소속 가족 그룹 ID
+  /// - **Returns**: `String` — 생성된 callId
+  /// - **Side Effects**: PeerConnection 생성 (RecvOnly), _isMonitoring=true
+  /// - **호출**: MonitoringScreen._startMonitoring
   Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     _isMonitoring = true;
@@ -467,7 +609,22 @@ class WebRtcService {
     return callId;
   }
 
-  /// 통화 발신 (모니터링 기반 — RecvOnly 시작 → Senior 수락 후 양방향 전환)
+  // ─── 통화 발신 (RecvOnly 시작) ───
+
+  /// (`Method`, async) 통화 발신 — RecvOnly로 시작 → Senior 수락 후 양방향 자동 전환
+  ///
+  /// 모니터링과 동일하게 RecvOnly로 연결을 수립하되, callType="call"로 Senior에 벨소리 표시.
+  /// Senior가 수락하면 `seniorAccepted=true`가 RTDB에 기록되고,
+  /// [_listenForSeniorAccepted]가 감지하여 [upgradeToCall]을 자동 호출.
+  /// 로컬 카메라 프리뷰는 PeerConnection에 미추가 상태로 미리 시작.
+  /// - **Params**:
+  ///   - [targetDeviceId] — 수신 대상 Senior 기기 ID
+  ///   - [callerUid] — 발신자 Firebase UID
+  ///   - [callerName] — 발신자 표시 이름
+  ///   - [familyId] — 소속 가족 그룹 ID
+  /// - **Returns**: `String` — 생성된 callId
+  /// - **Side Effects**: PeerConnection 생성 (RecvOnly), 로컬 프리뷰 시작, Senior 수락 감시
+  /// - **호출**: MonitoringScreen._startCall
   Future<String> startCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     _isMonitoring = true; // RecvOnly로 시작
@@ -588,7 +745,14 @@ class WebRtcService {
     return callId;
   }
 
-  /// 로컬 카메라 프리뷰만 ON (PeerConnection track 미추가 — 상대방에게 안 보임)
+  // ─── 로컬 프리뷰 ───
+
+  /// (`Utility`, async) 로컬 카메라 프리뷰만 ON (PeerConnection track 미추가)
+  ///
+  /// 상대방에게 영상이 전송되지 않는 상태로 카메라 프리뷰를 표시.
+  /// Senior 수락 전에 Family 쪽 PIP에서 자신의 영상을 미리 볼 수 있도록.
+  /// - **Side Effects**: _localStream 생성, localRenderer에 연결
+  /// - **호출**: [startCall]
   Future<void> _startLocalPreviewOnly() async {
     try {
       _localStream = await _getLocalStream();
@@ -599,7 +763,15 @@ class WebRtcService {
     }
   }
 
-  /// Senior 수락 감지 → upgradeToCall() 자동 호출
+  // ─── Senior 수락 감지 ───
+
+  /// (`Stream`) Senior 수락 감지 → [upgradeToCall] 자동 호출
+  ///
+  /// RTDB `calls/{callId}/seniorAccepted`가 true로 변경되면 양방향 전환 시작.
+  /// - **Params**:
+  ///   - [callId] — 감시할 통화 ID
+  /// - **Side Effects**: _seniorAcceptedSub 구독 시작
+  /// - **호출**: [startCall]
   void _listenForSeniorAccepted(String callId) {
     _seniorAcceptedSub = FirebaseDatabase.instance
         .ref('calls/$callId/seniorAccepted')
@@ -612,7 +784,14 @@ class WebRtcService {
     });
   }
 
-  /// 모니터링 → 통화 전환 (renegotiation)
+  // ─── 모니터링 → 통화 전환 ───
+
+  /// (`Method`, async) 모니터링 → 양방향 통화 전환 (SDP renegotiation)
+  ///
+  /// RecvOnly transceiver를 SendRecv로 변경하고 로컬 트랙을 추가한 뒤,
+  /// 새 SDP offer를 생성하여 Senior에 전송. Senior가 renegotiation answer를 보내면 전환 완료.
+  /// - **Side Effects**: transceiver 방향 변경, 로컬 트랙 추가, _isMonitoring=false (전환 완료 시)
+  /// - **호출**: [_listenForSeniorAccepted] (자동), MonitoringScreen._upgradeToCall (수동)
   Future<void> upgradeToCall() async {
     if (_peerConnection == null || _callId == null) return;
     print('WebRTC: 모니터링 → 통화 전환');
@@ -666,9 +845,22 @@ class WebRtcService {
     });
   }
 
+  // ─── 상태 접근자 ───
+
+  /// (`Getter`) 현재 모니터링(RecvOnly) 모드인지 여부
+  ///
+  /// - **Returns**: `bool` — true이면 단방향 수신 중, false이면 양방향 통화 중
+  /// - **호출**: MonitoringScreen._watchUpgrade, _upgradeToCall
   bool get isMonitoring => _isMonitoring;
 
-  /// 통화 종료
+  // ─── 통화 종료 ───
+
+  /// (`Method`, async) 통화 종료 — 미디어/PeerConnection 정리 + RTDB status="ended"
+  ///
+  /// 중복 호출 방지(_isHungUp), 로컬 트랙 정지, PeerConnection 종료,
+  /// 시그널링 endCall 후 2초 대기하여 상대방 감지 시간 확보 후 RTDB 노드 삭제.
+  /// - **Side Effects**: 모든 미디어/연결 리소스 해제, RTDB 상태 업데이트
+  /// - **호출**: MonitoringScreen._hangUp, 연결 끊김/실패 자동 감지
   Future<void> hangUp() async {
     if (_isHungUp) return;
     _isHungUp = true;
@@ -707,7 +899,12 @@ class WebRtcService {
     } catch (_) {}
   }
 
-  /// 리소스 해제
+  // ─── 리소스 해제 ───
+
+  /// (`Lifecycle`, async) 리소스 전체 해제 — hangUp + 렌더러 dispose
+  ///
+  /// - **Side Effects**: 통화 종료 + localRenderer/remoteRenderer 해제
+  /// - **호출**: MonitoringScreen.dispose
   Future<void> dispose() async {
     await hangUp();
     await localRenderer.dispose();

@@ -48,20 +48,23 @@ lib/
 │   ├── pairing_screen.dart                # 페어링 코드 입력 / QR 스캔
 │   ├── device_list_screen.dart            # 홈 — 가족 목록 (1명이면 자동 상세 진입)
 │   ├── family_detail_screen.dart          # 가족 상세 — 기기상태/액션버튼/사진/멤버
-│   ├── outgoing_call_screen.dart          # 발신 대기 + 영상통화
-│   ├── video_call_screen.dart             # 영상통화 화면
-│   └── photo_upload_screen.dart           # 사진 선택/촬영 + 업로드 + 그리드 목록
+│   ├── monitoring_screen.dart             # CCTV 모니터링 + 양방향 통화 (callType 파라미터)
+│   ├── photo_upload_screen.dart           # 사진 선택/촬영 + 업로드 + 그리드 목록
+│   └── reminder/
+│       ├── reminder_list_screen.dart      # 알림 목록
+│       └── reminder_edit_screen.dart      # 알림 생성/수정
 │
 ├── services/
 │   ├── auth_service.dart                  # 로그인/로그아웃/프로필 (4종 소셜)
 │   ├── family_service.dart                # 가족 그룹 참가/탈퇴, 멤버 관리, 가족 이름 설정
 │   ├── fcm_service.dart                   # FCM 토큰 관리 + RTDB 저장
-│   ├── photo_transfer_service.dart        # 사진 업로드/삭제/Storage 정리/실시간 목록
-│   └── call/
-│       ├── signaling_service.dart         # RTDB 시그널링 (offer/answer/ICE)
-│       └── webrtc_service.dart            # WebRTC 연결 (makeCall + 끊김감지)
-│
-└── widgets/                               # 공용 위젯 (필요시)
+│   ├── pairing_helper.dart                # 페어링 후 가족이름/내이름 설정 (공통)
+│   ├── photo_transfer_service.dart        # 사진 업로드 (Storage 임시 버퍼)
+│   ├── call/
+│   │   ├── signaling_service.dart         # RTDB 시그널링 (offer/answer/ICE)
+│   │   └── webrtc_service.dart            # WebRTC (makeCall, startMonitoring)
+│   └── reminder/
+│       └── reminder_service.dart          # 알림 CRUD + Storage 업로드
 ```
 
 ### Android 네이티브
@@ -85,17 +88,6 @@ functions/
 │   └── cleanupExpiredPhotos              # 만료 사진 정리 (6시간마다 스케줄)
 ├── package.json                          # 의존성 (firebase-admin, firebase-functions)
 └── dcom-smart-frame-firebase-adminsdk-*.json  # 서비스 계정 키 (gitignore)
-```
-
-### 로컬 플러그인
-
-```
-plugins/
-└── flutter_webrtc/                        # 패치된 flutter_webrtc (AEC3 + RNNoise)
-    └── android/src/main/
-        ├── java/.../MethodCallHandlerImpl.java   # HW AEC 감지 + RNNoise 등록
-        ├── java/.../audio/RNNoiseProcessor.java  # RNNoise Java wrapper
-        └── jni/                                   # RNNoise v0.2 NDK 빌드
 ```
 
 ---
