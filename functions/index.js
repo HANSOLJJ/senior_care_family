@@ -277,13 +277,15 @@ const DEVICE_OFFLINE_DAYS = 7;
  * Step 5: 고아 유저 참조 정리
  * Step 6: 고아 Storage 정리 (RTDB에 없는 familyId의 Storage 파일)
  */
-async function doOrphanCleanup() {
+async function doOrphanCleanup({ aggressive = false } = {}) {
   const db = admin.database();
   const now = Date.now();
   const offlineCutoff = now - DEVICE_OFFLINE_DAYS * 24 * 60 * 60 * 1000;
-  const result = { devices: 0, familyDevices: 0, families: 0, pairingCodes: 0, userRefs: 0 };
+  const result = { devices: 0, familyDevices: 0, families: 0, pairingCodes: 0, userRefs: 0, aggressive };
 
   // Step 1: 유령 디바이스 정리
+  // - 기본 모드: online=false + lastSeen 7일 이전
+  // - aggressive 모드: online=false + 소속 family가 members 0명 (재설치로 버려진 고아만 타격)
   const devicesSnap = await db.ref("devices").once("value");
   const devices = devicesSnap.val() || {};
   const activeDeviceIds = new Set();
@@ -291,7 +293,23 @@ async function doOrphanCleanup() {
   for (const [deviceId, device] of Object.entries(devices)) {
     const lastSeen = device.lastSeen || 0;
     const online = device.online || false;
-    if (!online && lastSeen < offlineCutoff) {
+    let removable;
+    if (aggressive) {
+      if (online) {
+        removable = false;
+      } else {
+        const fid = device.familyId;
+        if (!fid) {
+          removable = true; // familyId 없는 고아 device
+        } else {
+          const memSnap = await db.ref(`families/${fid}/members`).once("value");
+          removable = memSnap.numChildren() === 0;
+        }
+      }
+    } else {
+      removable = !online && lastSeen < offlineCutoff;
+    }
+    if (removable) {
       // /families/{fid}/devices/{did}도 삭제
       const fid = device.familyId;
       if (fid) {
@@ -420,7 +438,10 @@ exports.cleanupOrphanedData = functions.pubsub
  * HTTP 함수: 테스트용 수동 호출
  */
 exports.cleanupOrphanedDataManual = functions.https.onRequest(async (req, res) => {
-  const result = await doOrphanCleanup();
+  // ?aggressive=0 으로 호출하면 스케줄 함수와 동일한 보수적 정리 (7일 대기)
+  // 기본값은 aggressive=true — 수동 호출은 즉시 정리가 목적
+  const aggressive = req.query.aggressive !== "0";
+  const result = await doOrphanCleanup({ aggressive });
   res.json({
     success: true,
     ...result,
