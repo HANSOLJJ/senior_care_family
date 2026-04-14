@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../config/app_config.dart';
 import 'signaling_service.dart';
@@ -74,14 +75,63 @@ class WebRtcService {
 
   // ─── 타이머 / 구독 ───
 
-  /// 연결 끊김 감지 후 5초 대기 타이머
+  /// 연결 끊김 감지 후 grace 타이머 (만료 시 ICE restart 트리거)
   Timer? _disconnectTimer;
+
+  /// CONNECTED 안정 유지 확인 타이머 (만료 시 flap 카운터 리셋)
+  Timer? _stableTimer;
+
+  /// ICE restart offer 전송 후 answer 수신 대기 타이머 (만료 시 _iceRestartInProgress 리셋 + 재시도)
+  Timer? _iceRestartAnswerTimer;
 
   /// AEC(에코 제거) 메트릭 로깅 타이머 (5초 간격)
   Timer? _aecStatsTimer;
 
   /// Senior 수락 감지용 RTDB 구독 (`calls/{callId}/seniorAccepted`)
   StreamSubscription? _seniorAcceptedSub;
+
+  /// SDP answer 감시 구독
+  StreamSubscription? _answerSub;
+
+  /// 상대방 ICE candidate 감시 구독 (`calleeCandidates`)
+  StreamSubscription? _calleeCandidatesSub;
+
+  /// 통화 종료(`status=ended`) 감시 구독
+  StreamSubscription? _callEndSub;
+
+  /// ICE restart answer 감시 구독 (`iceRestartAnswer`)
+  StreamSubscription? _iceRestartAnswerSub;
+
+  // ─── ICE candidate 큐 / 경로 ───
+
+  /// callId 확정 전 수집된 ICE candidate 큐. `_callId` 세팅 시 [_flushPendingCandidates]로 비움.
+  final List<RTCIceCandidate> _pendingCandidates = [];
+
+  /// 내가 쓰는 ICE candidate RTDB 경로. Family는 항상 `callerCandidates`,
+  /// `_createPc`(answerCall 경로)에서만 `calleeCandidates`로 세팅.
+  String _myIceCandidatePath = 'callerCandidates';
+
+  // ─── ICE Restart 상태 ───
+
+  /// ICE restart 진행 중 여부 (중복 트리거 방지). setRemote(answer) 완료 finally에서 reset.
+  bool _iceRestartInProgress = false;
+
+  /// 누적 ICE restart 시도 횟수. CONNECTED 안정 5초 유지 시 0으로 리셋.
+  int _iceRestartAttempts = 0;
+
+  /// 최초 DISCONNECTED 진입 시각(ms). flap window 계산용. CONNECTED 안정 시 null.
+  int? _flapWindowStart;
+
+  /// 재연결 진행 여부 ValueNotifier — MonitoringScreen이 ValueListenableBuilder로 구독.
+  final ValueNotifier<bool> isReconnecting = ValueNotifier(false);
+
+  // ─── 상수 ───
+
+  static const _graceMs = 4000;             // DISCONNECTED → ICE restart trigger 까지 대기
+  static const _maxFlapWindowMs = 60000;    // 최초 disconnect 이후 세션 상한
+  static const _stableResetMs = 5000;       // CONNECTED 유지 시 flap 카운터 리셋
+  static const _maxIceRestartAttempts = 5;
+  static const _iceRestartAnswerTimeoutMs = 10000; // offer 전송 후 answer 대기 시간
 
   // ─── 콜백 ───
 
@@ -146,6 +196,7 @@ class WebRtcService {
   /// - **Side Effects**: 비트레이트 설정 (4Mbps), 원격 스트림 수신 시 remoteRenderer 연결
   /// - **호출**: [answerCall]
   Future<RTCPeerConnection> _createPc(String callId, {required String myCandidatesPath}) async {
+    _myIceCandidatePath = myCandidatesPath;
     final pc = await createPeerConnection(_iceServers);
 
     // 로컬 트랙 추가
@@ -154,47 +205,9 @@ class WebRtcService {
     }
     await _setVideoBitrate(pc, 4000);
 
-    // 원격 스트림 수신
-    pc.onTrack = (RTCTrackEvent event) {
-      print('WebRTC: 원격 트랙 수신 kind=${event.track.kind}');
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        remoteRenderer.srcObject = _remoteStream;
-      }
-    };
-
-    // ICE candidate → 시그널링 서버에 전송
-    pc.onIceCandidate = (RTCIceCandidate candidate) {
-      _signaling.addCandidate(callId, myCandidatesPath, {
-        'candidate': candidate.candidate,
-        'sdpMid': candidate.sdpMid,
-        'sdpMLineIndex': candidate.sdpMLineIndex,
-      });
-    };
-
-    // 연결 상태 감시 — 끊김 감지 → 5초 후 자동 종료
-    pc.onConnectionState = (RTCPeerConnectionState state) {
-      print('WebRTC: 연결 상태 = $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _disconnectTimer?.cancel();
-        _disconnectTimer = Timer(const Duration(seconds: 5), () {
-          final currentState = _peerConnection?.connectionState;
-          if (currentState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-              currentState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-            print('WebRTC: 5초간 복구 안 됨 → 자동 종료');
-            hangUp();
-            onCallEnded?.call();
-          }
-        });
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _disconnectTimer?.cancel();
-        print('WebRTC: 연결 실패 → 자동 종료');
-        hangUp();
-        onCallEnded?.call();
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _disconnectTimer?.cancel();
-      }
-    };
+    pc.onTrack = _onTrack;
+    pc.onIceCandidate = _onIceCandidate;
+    pc.onConnectionState = _onPeerConnectionStateChanged;
 
     return pc;
   }
@@ -328,6 +341,148 @@ class WebRtcService {
     _aecStatsTimer = null;
   }
 
+  // ─── PC 콜백 헬퍼 (4개 PC 생성 지점 공통) ───
+
+  /// (`Callback`) 원격 트랙 수신 — `_remoteStream`/`remoteRenderer` 세팅
+  void _onTrack(RTCTrackEvent event) {
+    print('WebRTC: 원격 트랙 수신 kind=${event.track.kind}');
+    if (event.streams.isNotEmpty) {
+      _remoteStream = event.streams[0];
+      remoteRenderer.srcObject = _remoteStream;
+    }
+  }
+
+  /// (`Callback`) ICE candidate 생성 — `_callId` 있으면 즉시 전송, 없으면 큐잉
+  void _onIceCandidate(RTCIceCandidate candidate) {
+    if (_callId != null) {
+      _signaling.addCandidate(_callId!, _myIceCandidatePath, {
+        'candidate': candidate.candidate,
+        'sdpMid': candidate.sdpMid,
+        'sdpMLineIndex': candidate.sdpMLineIndex,
+      });
+    } else {
+      _pendingCandidates.add(candidate);
+    }
+  }
+
+  /// (`Utility`) `_callId` 확정 후 큐에 쌓인 ICE candidate 일괄 전송
+  void _flushPendingCandidates() {
+    if (_callId == null || _pendingCandidates.isEmpty) return;
+    print('WebRTC: 대기 중 ICE candidate ${_pendingCandidates.length}개 전송');
+    for (final c in _pendingCandidates) {
+      _signaling.addCandidate(_callId!, _myIceCandidatePath, {
+        'candidate': c.candidate,
+        'sdpMid': c.sdpMid,
+        'sdpMLineIndex': c.sdpMLineIndex,
+      });
+    }
+    _pendingCandidates.clear();
+  }
+
+  /// (`Callback`) PeerConnection 상태 변화 — DISCONNECTED/FAILED 시 ICE restart 트리거
+  ///
+  /// - DISCONNECTED: grace 4초 대기 후 [_triggerIceRestart] (이미 진행 중이면 skip)
+  /// - FAILED: 즉시 [_triggerIceRestart]
+  /// - CONNECTED: grace/state 리셋, 5초 안정 유지 시 flap 카운터 리셋
+  void _onPeerConnectionStateChanged(RTCPeerConnectionState state) {
+    print('WebRTC: 연결 상태 = $state');
+    if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+      if (_iceRestartInProgress) return;
+      isReconnecting.value = true;
+      _disconnectTimer?.cancel();
+      _disconnectTimer = Timer(const Duration(milliseconds: _graceMs), () {
+        _triggerIceRestart();
+      });
+    } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+      _disconnectTimer?.cancel();
+      isReconnecting.value = true;
+      _triggerIceRestart();
+    } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+      _disconnectTimer?.cancel();
+      _iceRestartInProgress = false; // 안전망
+      _iceRestartAnswerTimer?.cancel();
+      _iceRestartAnswerTimer = null;
+      isReconnecting.value = false;
+      _stableTimer?.cancel();
+      _stableTimer = Timer(const Duration(milliseconds: _stableResetMs), () {
+        if (_peerConnection?.connectionState ==
+            RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          _iceRestartAttempts = 0;
+          _flapWindowStart = null;
+        }
+      });
+    }
+  }
+
+  // ─── ICE Restart 트리거 ───
+
+  /// (`Method`, async) ICE restart offer 생성 + 전송
+  ///
+  /// flap window/attempts 한도 체크 후 `pc.restartIce() + createOffer + setLocalDescription`,
+  /// SignalingService를 통해 RTDB `iceRestartOffer` 노드에 SDP 기록.
+  /// - **Side Effects**: `_iceRestartInProgress=true`, `_iceRestartAttempts++`, RTDB write.
+  ///   한도 초과 시 [hangUp] + `onCallEnded` 호출.
+  /// - **호출**: [_onPeerConnectionStateChanged] (DISCONNECTED grace 만료 / FAILED 즉시)
+  Future<void> _triggerIceRestart() async {
+    if (_isHungUp) return;
+    if (_iceRestartInProgress) return;
+    if (_peerConnection == null || _callId == null) return;
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    _flapWindowStart ??= now;
+    if (now - _flapWindowStart! > _maxFlapWindowMs) {
+      print('WebRTC: flap window($_maxFlapWindowMs ms) 초과 → hangUp');
+      await hangUp();
+      onCallEnded?.call();
+      return;
+    }
+    if (_iceRestartAttempts >= _maxIceRestartAttempts) {
+      print('WebRTC: ICE restart 한도($_maxIceRestartAttempts) 초과 → hangUp');
+      await hangUp();
+      onCallEnded?.call();
+      return;
+    }
+
+    _iceRestartAttempts++;
+    _iceRestartInProgress = true;
+
+    try {
+      await _peerConnection!.restartIce();
+      final offer = await _peerConnection!.createOffer();
+      await _peerConnection!.setLocalDescription(offer);
+      // sendIceRestartOffer 자체에 writeOrTimeout 가드 추가 권장이지만,
+      // 일단 여기서 5초 타임아웃으로 감싸 RTDB 큐잉 시 hang 방지.
+      await _signaling
+          .sendIceRestartOffer(_callId!, {
+            'sdp': offer.sdp,
+            'type': offer.type,
+          })
+          .timeout(const Duration(seconds: 5));
+      print('WebRTC: ICE restart offer 전송 (attempt=$_iceRestartAttempts)');
+
+      // answer 수신 대기 타이머 — 만료 시 _iceRestartInProgress 리셋 + 자동 재시도.
+      // 재시도는 _triggerIceRestart 재호출로, 한도/flap window 자동 체크됨.
+      _iceRestartAnswerTimer?.cancel();
+      _iceRestartAnswerTimer = Timer(
+        const Duration(milliseconds: _iceRestartAnswerTimeoutMs),
+        () {
+          if (!_iceRestartInProgress) return;
+          print('WebRTC: ICE restart answer 미수신 (${_iceRestartAnswerTimeoutMs}ms) → 재시도 트리거');
+          _iceRestartInProgress = false;
+          // 여전히 DISCONNECTED/FAILED면 재시도. CONNECTED 복귀했으면 _triggerIceRestart 초입 가드로 skip.
+          final state = _peerConnection?.connectionState;
+          if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+              state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+            _triggerIceRestart();
+          }
+        },
+      );
+    } catch (e) {
+      print('WebRTC: ICE restart 실패: $e');
+      _iceRestartInProgress = false; // 다음 DISCONNECTED 때 재시도 가능
+    }
+  }
+
   // ─── 발신 처리 ───
 
   /// (`Method`, async) 양방향 영상통화 발신 — offer 생성 → RTDB 전송 → answer 대기
@@ -347,17 +502,14 @@ class WebRtcService {
   /// - **호출**: (현재 미사용 — startCall로 대체됨)
   Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
+    _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 발신 시작 → target=$targetDeviceId');
 
     // 1. 로컬 미디어 스트림
     _localStream = await _getLocalStream();
     localRenderer.srcObject = _localStream;
 
-    // 2. ICE candidate 큐 (callId 확정 전에 수집)
-    final pendingCandidates = <RTCIceCandidate>[];
-    String? resolvedCallId;
-
-    // 3. PeerConnection 생성 — onIceCandidate를 먼저 등록
+    // 2. PeerConnection 생성 — onIceCandidate를 먼저 등록 (callId 확정 전 candidate는 _pendingCandidates에 큐잉)
     final pc = await createPeerConnection(_iceServers);
     _peerConnection = pc;
 
@@ -366,50 +518,9 @@ class WebRtcService {
     }
     await _setVideoBitrate(pc, 4000);
 
-    pc.onTrack = (RTCTrackEvent event) {
-      print('WebRTC: 원격 트랙 수신 kind=${event.track.kind}');
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        remoteRenderer.srcObject = _remoteStream;
-      }
-    };
-
-    // ICE candidate → callId 있으면 즉시 전송, 없으면 큐에 저장
-    pc.onIceCandidate = (RTCIceCandidate candidate) {
-      if (resolvedCallId != null) {
-        _signaling.addCandidate(resolvedCallId, 'callerCandidates', {
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
-      } else {
-        pendingCandidates.add(candidate);
-      }
-    };
-
-    // 연결 상태 감시
-    pc.onConnectionState = (RTCPeerConnectionState state) {
-      print('WebRTC: 연결 상태 = $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _disconnectTimer?.cancel();
-        _disconnectTimer = Timer(const Duration(seconds: 5), () {
-          final currentState = _peerConnection?.connectionState;
-          if (currentState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-              currentState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-            print('WebRTC: 5초간 복구 안 됨 → 자동 종료');
-            hangUp();
-            onCallEnded?.call();
-          }
-        });
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _disconnectTimer?.cancel();
-        print('WebRTC: 연결 실패 → 자동 종료');
-        hangUp();
-        onCallEnded?.call();
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _disconnectTimer?.cancel();
-      }
-    };
+    pc.onTrack = _onTrack;
+    pc.onIceCandidate = _onIceCandidate;
+    pc.onConnectionState = _onPeerConnectionStateChanged;
 
     // 4. SDP offer 생성
     final offer = await pc.createOffer();
@@ -425,24 +536,35 @@ class WebRtcService {
       targetFamilyId: familyId,
     );
     _callId = callId;
-    resolvedCallId = callId;
 
     // onDisconnect 설정
     await _signaling.setCallCleanupOnDisconnect(callId);
 
     // 큐에 쌓인 ICE candidate 전송
-    print('WebRTC: 대기 중 ICE candidate ${pendingCandidates.length}개 전송');
-    for (final c in pendingCandidates) {
-      _signaling.addCandidate(callId, 'callerCandidates', {
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    }
-    pendingCandidates.clear();
+    _flushPendingCandidates();
 
-    // 6. 수신자의 answer 감시
-    _signaling.listenForAnswer(callId, (answer) async {
+    // 6. 시그널링 리스너 등록 (구독은 hangUp/dispose에서 cancel)
+    _registerSignalingListeners(callId);
+
+    print('WebRTC: 발신 완료, answer 대기 중 callId=$callId');
+    _startAecStats();
+    return callId;
+  }
+
+  // ─── 시그널링 리스너 통합 등록 (3개 발신 메서드 공통) ───
+
+  /// (`Method`) callId 확정 후 answer/candidates/callEnd/iceRestartAnswer 4종 구독 등록
+  ///
+  /// 모든 구독은 인스턴스 필드에 보관되어 [hangUp]에서 일괄 cancel.
+  /// - **Side Effects**: `_answerSub`/`_calleeCandidatesSub`/`_callEndSub`/`_iceRestartAnswerSub` 세팅
+  /// - **호출**: [makeCall], [startMonitoring], [startCall]
+  void _registerSignalingListeners(String callId) {
+    _answerSub?.cancel();
+    _calleeCandidatesSub?.cancel();
+    _callEndSub?.cancel();
+    _iceRestartAnswerSub?.cancel();
+
+    _answerSub = _signaling.listenForAnswer(callId, (answer) async {
       if (_peerConnection?.signalingState ==
           RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
         print('WebRTC: SDP answer 수신');
@@ -452,9 +574,8 @@ class WebRtcService {
       }
     });
 
-    // 7. 수신자의 ICE candidates 감시
-    _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
-      print('WebRTC: 수신자 ICE candidate 수신');
+    _calleeCandidatesSub =
+        _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
       _peerConnection?.addCandidate(RTCIceCandidate(
         candidate['candidate'],
         candidate['sdpMid'],
@@ -462,16 +583,32 @@ class WebRtcService {
       ));
     });
 
-    // 8. 상대방 통화 종료 감시
-    _signaling.listenForCallEnd(callId, () {
-      print('WebRTC: 상대방이 통화 종료');
+    _callEndSub = _signaling.listenForCallEnd(callId, () {
       hangUp();
       onCallEnded?.call();
     });
 
-    print('WebRTC: 발신 완료, answer 대기 중 callId=$callId');
-    _startAecStats();
-    return callId;
+    _iceRestartAnswerSub =
+        _signaling.listenForIceRestartAnswer(callId, (answer) async {
+      if (_peerConnection == null) return;
+      if (_peerConnection!.signalingState ==
+          RTCSignalingState.RTCSignalingStateStable) {
+        print('WebRTC: ICE restart answer 무시 (stable, 이미 적용됨)');
+        return;
+      }
+      try {
+        await _peerConnection!.setRemoteDescription(
+          RTCSessionDescription(answer['sdp'], answer['type']),
+        );
+        print('WebRTC: ICE restart answer 적용 완료');
+      } catch (e) {
+        print('WebRTC: ICE restart setRemote 실패: $e');
+      } finally {
+        _iceRestartInProgress = false;
+        _iceRestartAnswerTimer?.cancel();
+        _iceRestartAnswerTimer = null;
+      }
+    });
   }
 
   // ─── 모니터링 발신 ───
@@ -491,12 +628,10 @@ class WebRtcService {
   Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     _isMonitoring = true;
+    _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 모니터링 시작 → target=$targetDeviceId');
 
     // PeerConnection 생성 — 로컬 미디어 없음
-    final pendingCandidates = <RTCIceCandidate>[];
-    String? resolvedCallId;
-
     final pc = await createPeerConnection(_iceServers);
     _peerConnection = pc;
 
@@ -510,46 +645,9 @@ class WebRtcService {
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
 
-    pc.onTrack = (RTCTrackEvent event) {
-      print('WebRTC: 모니터링 원격 트랙 수신 kind=${event.track.kind}');
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        remoteRenderer.srcObject = _remoteStream;
-      }
-    };
-
-    pc.onIceCandidate = (RTCIceCandidate candidate) {
-      if (resolvedCallId != null) {
-        _signaling.addCandidate(resolvedCallId, 'callerCandidates', {
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
-      } else {
-        pendingCandidates.add(candidate);
-      }
-    };
-
-    pc.onConnectionState = (RTCPeerConnectionState state) {
-      print('WebRTC: 모니터링 연결 상태 = $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _disconnectTimer?.cancel();
-        _disconnectTimer = Timer(const Duration(seconds: 5), () {
-          final currentState = _peerConnection?.connectionState;
-          if (currentState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-              currentState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-            hangUp();
-            onCallEnded?.call();
-          }
-        });
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _disconnectTimer?.cancel();
-        hangUp();
-        onCallEnded?.call();
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _disconnectTimer?.cancel();
-      }
-    };
+    pc.onTrack = _onTrack;
+    pc.onIceCandidate = _onIceCandidate;
+    pc.onConnectionState = _onPeerConnectionStateChanged;
 
     // SDP offer 생성
     final offer = await pc.createOffer();
@@ -566,44 +664,11 @@ class WebRtcService {
       callType: 'monitor',
     );
     _callId = callId;
-    resolvedCallId = callId;
 
     await _signaling.setCallCleanupOnDisconnect(callId);
 
-    // 큐에 쌓인 ICE candidate 전송
-    for (final c in pendingCandidates) {
-      _signaling.addCandidate(callId, 'callerCandidates', {
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    }
-    pendingCandidates.clear();
-
-    // answer 감시
-    _signaling.listenForAnswer(callId, (answer) async {
-      if (_peerConnection?.signalingState ==
-          RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-        await _peerConnection?.setRemoteDescription(
-          RTCSessionDescription(answer['sdp'], answer['type']),
-        );
-      }
-    });
-
-    // ICE candidates 감시
-    _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
-      _peerConnection?.addCandidate(RTCIceCandidate(
-        candidate['candidate'],
-        candidate['sdpMid'],
-        candidate['sdpMLineIndex'],
-      ));
-    });
-
-    // 종료 감시
-    _signaling.listenForCallEnd(callId, () {
-      hangUp();
-      onCallEnded?.call();
-    });
+    _flushPendingCandidates();
+    _registerSignalingListeners(callId);
 
     print('WebRTC: 모니터링 발신 완료 callId=$callId');
     return callId;
@@ -628,10 +693,8 @@ class WebRtcService {
   Future<String> startCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
     _isHungUp = false;
     _isMonitoring = true; // RecvOnly로 시작
+    _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 통화 발신 시작 → target=$targetDeviceId');
-
-    final pendingCandidates = <RTCIceCandidate>[];
-    String? resolvedCallId;
 
     final pc = await createPeerConnection(_iceServers);
     _peerConnection = pc;
@@ -645,46 +708,9 @@ class WebRtcService {
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
 
-    pc.onTrack = (RTCTrackEvent event) {
-      print('WebRTC: 통화 원격 트랙 수신 kind=${event.track.kind}');
-      if (event.streams.isNotEmpty) {
-        _remoteStream = event.streams[0];
-        remoteRenderer.srcObject = _remoteStream;
-      }
-    };
-
-    pc.onIceCandidate = (RTCIceCandidate candidate) {
-      if (resolvedCallId != null) {
-        _signaling.addCandidate(resolvedCallId, 'callerCandidates', {
-          'candidate': candidate.candidate,
-          'sdpMid': candidate.sdpMid,
-          'sdpMLineIndex': candidate.sdpMLineIndex,
-        });
-      } else {
-        pendingCandidates.add(candidate);
-      }
-    };
-
-    pc.onConnectionState = (RTCPeerConnectionState state) {
-      print('WebRTC: 통화 연결 상태 = $state');
-      if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
-        _disconnectTimer?.cancel();
-        _disconnectTimer = Timer(const Duration(seconds: 5), () {
-          final s = _peerConnection?.connectionState;
-          if (s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-              s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-            hangUp();
-            onCallEnded?.call();
-          }
-        });
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-        _disconnectTimer?.cancel();
-        hangUp();
-        onCallEnded?.call();
-      } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-        _disconnectTimer?.cancel();
-      }
-    };
+    pc.onTrack = _onTrack;
+    pc.onIceCandidate = _onIceCandidate;
+    pc.onConnectionState = _onPeerConnectionStateChanged;
 
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -699,40 +725,11 @@ class WebRtcService {
       callType: 'call',
     );
     _callId = callId;
-    resolvedCallId = callId;
 
     await _signaling.setCallCleanupOnDisconnect(callId);
 
-    for (final c in pendingCandidates) {
-      _signaling.addCandidate(callId, 'callerCandidates', {
-        'candidate': c.candidate,
-        'sdpMid': c.sdpMid,
-        'sdpMLineIndex': c.sdpMLineIndex,
-      });
-    }
-    pendingCandidates.clear();
-
-    _signaling.listenForAnswer(callId, (answer) async {
-      if (_peerConnection?.signalingState ==
-          RTCSignalingState.RTCSignalingStateHaveLocalOffer) {
-        await _peerConnection?.setRemoteDescription(
-          RTCSessionDescription(answer['sdp'], answer['type']),
-        );
-      }
-    });
-
-    _signaling.listenForCandidates(callId, 'calleeCandidates', (candidate) {
-      _peerConnection?.addCandidate(RTCIceCandidate(
-        candidate['candidate'],
-        candidate['sdpMid'],
-        candidate['sdpMLineIndex'],
-      ));
-    });
-
-    _signaling.listenForCallEnd(callId, () {
-      hangUp();
-      onCallEnded?.call();
-    });
+    _flushPendingCandidates();
+    _registerSignalingListeners(callId);
 
     // 로컬 카메라 프리뷰 시작 (상대방에게 미전송)
     await _startLocalPreviewOnly();
@@ -866,9 +863,31 @@ class WebRtcService {
     _isHungUp = true;
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
+    _stableTimer?.cancel();
+    _stableTimer = null;
+    _iceRestartAnswerTimer?.cancel();
+    _iceRestartAnswerTimer = null;
     _stopAecStats();
+
+    // 모든 시그널링 구독 해제 (callEnd 콜백이 hangUp을 다시 호출하는 루프 방지)
+    await _answerSub?.cancel();
+    await _calleeCandidatesSub?.cancel();
+    await _callEndSub?.cancel();
+    await _iceRestartAnswerSub?.cancel();
     await _seniorAcceptedSub?.cancel();
+    _answerSub = null;
+    _calleeCandidatesSub = null;
+    _callEndSub = null;
+    _iceRestartAnswerSub = null;
     _seniorAcceptedSub = null;
+
+    // ICE restart 상태 리셋
+    isReconnecting.value = false;
+    _iceRestartInProgress = false;
+    _iceRestartAttempts = 0;
+    _flapWindowStart = null;
+    _pendingCandidates.clear();
+
     // 자기 hangUp 시 listenForCallEnd 콜백 방지
     onCallEnded = null;
     print('WebRTC: 통화 종료');
@@ -909,5 +928,6 @@ class WebRtcService {
     await hangUp();
     await localRenderer.dispose();
     await remoteRenderer.dispose();
+    isReconnecting.dispose();
   }
 }

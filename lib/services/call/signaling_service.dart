@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
+import '../network_guard.dart';
 
 /// (`Service`) Firebase Realtime DB 시그널링 서비스
 ///
@@ -102,12 +103,13 @@ class SignalingService {
   /// - **Params**:
   ///   - [callId] — 감시할 통화 ID
   ///   - [onAnswer] — answer 수신 시 콜백
+  /// - **Returns**: `StreamSubscription` — 호출자가 보관 후 hangUp/dispose 시 cancel
   /// - **호출**: WebRtcService.makeCall, startMonitoring, startCall
-  void listenForAnswer(
+  StreamSubscription listenForAnswer(
     String callId,
     void Function(Map<String, dynamic> answer) onAnswer,
   ) {
-    _db.child('calls/$callId/answer').onValue.listen((event) {
+    return _db.child('calls/$callId/answer').onValue.listen((event) {
       final data = event.snapshot.value as Map?;
       if (data == null) return;
       onAnswer(Map<String, dynamic>.from(data));
@@ -120,9 +122,10 @@ class SignalingService {
   /// - **Params**:
   ///   - [callId] — 감시할 통화 ID
   ///   - [onCallEnded] — 종료 감지 시 콜백
+  /// - **Returns**: `StreamSubscription` — 호출자가 보관 후 hangUp/dispose 시 cancel
   /// - **호출**: WebRtcService.makeCall, answerCall, startMonitoring, startCall
-  void listenForCallEnd(String callId, void Function() onCallEnded) {
-    _db.child('calls/$callId/status').onValue.listen((event) {
+  StreamSubscription listenForCallEnd(String callId, void Function() onCallEnded) {
+    return _db.child('calls/$callId/status').onValue.listen((event) {
       final status = event.snapshot.value as String?;
       if (status == 'ended') {
         print('시그널링: 상대방이 통화 종료 callId=$callId');
@@ -139,13 +142,14 @@ class SignalingService {
   ///   - [callId] — 통화 ID
   ///   - [path] — RTDB 하위 경로 (`"callerCandidates"` 또는 `"calleeCandidates"`)
   ///   - [onCandidate] — candidate 수신 시 콜백
+  /// - **Returns**: `StreamSubscription` — 호출자가 보관 후 hangUp/dispose 시 cancel
   /// - **호출**: WebRtcService (양측 ICE candidate 교환)
-  void listenForCandidates(
+  StreamSubscription listenForCandidates(
     String callId,
     String path,
     void Function(Map<String, dynamic> candidate) onCandidate,
   ) {
-    _db.child('calls/$callId/$path').onChildAdded.listen((event) {
+    return _db.child('calls/$callId/$path').onChildAdded.listen((event) {
       final data = event.snapshot.value as Map?;
       if (data == null) return;
       onCandidate(Map<String, dynamic>.from(data));
@@ -182,18 +186,24 @@ class SignalingService {
     final callId = callRef.key!;
     final name = callerName ?? '가족';
     final label = '$name → $targetDeviceId ($callType) ringing';
-    await callRef.set({
-      '_label': label,
-      'offer': offer,
-      'targetDeviceId': targetDeviceId,
-      'targetFamilyId': targetFamilyId,
-      'callerUid': callerUid,
-      'callerName': name,
-      'callerDeviceId': callerDeviceId,
-      'callType': callType,
-      'status': 'ringing',
-      'createdAt': ServerValue.timestamp,
-    });
+    // 네트워크 오프라인 시 서버 ACK가 안 와서 Future가 멈추는 걸 방지.
+    // 타임아웃 시 큐에 쌓인 노드를 즉시 remove해서 복구 시 flush 방지.
+    await writeOrTimeout(
+      () => callRef.set({
+        '_label': label,
+        'offer': offer,
+        'targetDeviceId': targetDeviceId,
+        'targetFamilyId': targetFamilyId,
+        'callerUid': callerUid,
+        'callerName': name,
+        'callerDeviceId': callerDeviceId,
+        'callType': callType,
+        'status': 'ringing',
+        'createdAt': ServerValue.timestamp,
+      }),
+      label: callType == 'monitor' ? '모니터링 요청' : '통화 요청',
+      onTimeoutCleanup: () => callRef.remove(),
+    );
     _currentCallId = callId;
     _currentFamilyId = targetFamilyId;
 
@@ -323,6 +333,41 @@ class SignalingService {
     void Function(Map<String, dynamic> answer) onAnswer,
   ) {
     _db.child('calls/$callId/renegotiateAnswer').onValue.listen((event) {
+      final data = event.snapshot.value as Map?;
+      if (data == null) return;
+      onAnswer(Map<String, dynamic>.from(data));
+    });
+  }
+
+  // ─── ICE Restart (네트워크 일시 단절 후 재협상) ───
+
+  /// (`Method`, async) ICE restart offer 전송
+  ///
+  /// IN_CALL 중 peer가 DISCONNECTED/FAILED 상태가 되면 Family가 새 offer를
+  /// 생성해 Senior에게 보낸다. SDP는 `pc.restartIce() + createOffer()` 결과.
+  /// - **Params**:
+  ///   - [callId] — 통화 ID
+  ///   - [offer] — restart offer SDP (`{sdp, type}`)
+  /// - **Side Effects**: RTDB `calls/{cid}/iceRestartOffer` 노드 set
+  /// - **호출**: WebRtcService._triggerIceRestart
+  Future<void> sendIceRestartOffer(String callId, Map<String, dynamic> offer) async {
+    await _db.child('calls/$callId/iceRestartOffer').set(offer);
+    print('시그널링: ICE restart offer 전송 callId=$callId');
+  }
+
+  /// (`Stream`) ICE restart answer 감시
+  ///
+  /// Senior가 새 answer를 RTDB에 쓰면 콜백 호출. 호출자가 setRemoteDescription 수행.
+  /// - **Params**:
+  ///   - [callId] — 통화 ID
+  ///   - [onAnswer] — answer 수신 시 콜백
+  /// - **Returns**: `StreamSubscription` — 호출자가 보관 후 hangUp/dispose 시 cancel
+  /// - **호출**: WebRtcService.startCall/makeCall/startMonitoring (PC 생성 직후 1회)
+  StreamSubscription listenForIceRestartAnswer(
+    String callId,
+    void Function(Map<String, dynamic> answer) onAnswer,
+  ) {
+    return _db.child('calls/$callId/iceRestartAnswer').onValue.listen((event) {
       final data = event.snapshot.value as Map?;
       if (data == null) return;
       onAnswer(Map<String, dynamic>.from(data));

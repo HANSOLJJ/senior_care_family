@@ -1,8 +1,9 @@
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_storage/firebase_storage.dart';
+import '../firebase_instances_mixin.dart';
+import '../network_guard.dart';
 
 /// 영상 알림 데이터 모델 (`Model`)
 ///
@@ -142,15 +143,7 @@ class Reminder {
 ///
 /// Senior가 미디어 다운로드 완료 시 mediaDownloaded:true 업데이트
 /// → CF(onReminderMediaDownloaded)가 Storage 파일 삭제 (임시 버퍼 패턴)
-class ReminderService {
-  /// Firebase RTDB 싱글턴 인스턴스
-  final FirebaseDatabase _db = FirebaseDatabase.instance;
-
-  /// Firebase Storage 싱글턴 인스턴스
-  final FirebaseStorage _storage = FirebaseStorage.instance;
-
-  /// Firebase Auth 싱글턴 인스턴스
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+class ReminderService with FirebaseInstancesMixin {
 
   // ─── 생성 ───
 
@@ -178,15 +171,15 @@ class ReminderService {
     required String mediaType,
     void Function(double progress)? onProgress,
   }) async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) throw Exception('로그인 필요');
 
-    final reminderId = _db.ref().push().key!;
+    final reminderId = db.ref().push().key!;
 
     // 1. Storage 업로드
     final ext = mediaType == 'video' ? 'mp4' : 'm4a';
     final storagePath = 'families/$familyId/reminders/$reminderId/$reminderId.$ext';
-    final ref = _storage.ref(storagePath);
+    final ref = storage.ref(storagePath);
 
     final bytes = await mediaFile.readAsBytes();
     final uploadTask = ref.putData(
@@ -212,26 +205,31 @@ class ReminderService {
     final createdByName = user.displayName ?? '가족';
     final repeatLabel = repeat == 'daily' ? '매일' : repeat;
     final label = '$title $time $repeatLabel by $createdByName [ON]';
-    await _db.ref('families/$familyId/reminders/$reminderId').set({
-      '_label': label,
-      'title': title,
-      'mediaUrl': downloadUrl,
-      'mediaType': mediaType,
-      'mediaDuration': 0, // edit screen에서 설정
-      'schedule': {
-        'time': time,
-        'repeat': repeat,
-        if (repeat == 'custom') 'days': days,
-      },
-      'enabled': true,
-      'createdBy': user.uid,
-      'createdByName': createdByName,
-      'mediaDownloaded': false,
-      'targetDeviceId': null,
-      'targetDeviceName': null,
-      'createdAt': ServerValue.timestamp,
-      'updatedAt': ServerValue.timestamp,
-    });
+    final reminderRef = db.ref('families/$familyId/reminders/$reminderId');
+    await writeOrTimeout(
+      () => reminderRef.set({
+        '_label': label,
+        'title': title,
+        'mediaUrl': downloadUrl,
+        'mediaType': mediaType,
+        'mediaDuration': 0, // edit screen에서 설정
+        'schedule': {
+          'time': time,
+          'repeat': repeat,
+          if (repeat == 'custom') 'days': days,
+        },
+        'enabled': true,
+        'createdBy': user.uid,
+        'createdByName': createdByName,
+        'mediaDownloaded': false,
+        'targetDeviceId': null,
+        'targetDeviceName': null,
+        'createdAt': ServerValue.timestamp,
+        'updatedAt': ServerValue.timestamp,
+      }),
+      label: '알림 생성',
+      onTimeoutCleanup: () => reminderRef.remove(),
+    );
     print('Reminder 생성: $reminderId');
 
     return reminderId;
@@ -270,7 +268,7 @@ class ReminderService {
 
     if (time != null || repeat != null || days != null) {
       // 기존 schedule 읽어서 merge
-      final snapshot = await _db
+      final snapshot = await db
           .ref('families/$familyId/reminders/$reminderId/schedule')
           .get();
       final existing =
@@ -286,7 +284,7 @@ class ReminderService {
     if (mediaFile != null && mediaType != null) {
       // 기존 파일 전체 삭제 (파일명이 바뀔 수 있으므로 폴더 내 전부)
       try {
-        final listResult = await _storage
+        final listResult = await storage
             .ref('families/$familyId/reminders/$reminderId')
             .listAll();
         for (final item in listResult.items) {
@@ -298,7 +296,7 @@ class ReminderService {
       final ext = mediaType == 'video' ? 'mp4' : 'm4a';
       final storagePath =
           'families/$familyId/reminders/$reminderId/$reminderId.$ext';
-      final ref = _storage.ref(storagePath);
+      final ref = storage.ref(storagePath);
       final bytes = await mediaFile.readAsBytes();
       final uploadTask = ref.putData(
         Uint8List.fromList(bytes),
@@ -320,7 +318,7 @@ class ReminderService {
       print('Reminder 미디어 재업로드: $storagePath');
     }
 
-    await _db.ref('families/$familyId/reminders/$reminderId').update(updates);
+    await db.ref('families/$familyId/reminders/$reminderId').update(updates);
     print('Reminder 수정: $reminderId');
   }
 
@@ -337,7 +335,7 @@ class ReminderService {
   /// - **Side Effects**: RTDB 노드 삭제 → CF 트리거
   /// - **호출**: reminder_list_screen.dart 스와이프 삭제
   Future<void> deleteReminder(String familyId, String reminderId) async {
-    await _db.ref('families/$familyId/reminders/$reminderId').remove();
+    await db.ref('families/$familyId/reminders/$reminderId').remove();
     print('Reminder 삭제: $reminderId');
   }
 
@@ -353,7 +351,7 @@ class ReminderService {
   /// - **호출**: reminder_list_screen.dart Switch 위젯
   Future<void> toggleReminder(
       String familyId, String reminderId, bool enabled) async {
-    await _db.ref('families/$familyId/reminders/$reminderId').update({
+    await db.ref('families/$familyId/reminders/$reminderId').update({
       'enabled': enabled,
       'updatedAt': ServerValue.timestamp,
     });
@@ -372,7 +370,7 @@ class ReminderService {
   /// - **Returns**: `Stream<List<Reminder>>` — 알림 목록 스트림
   /// - **호출**: reminder_list_screen.dart에서 구독
   Stream<List<Reminder>> watchReminders(String familyId) {
-    return _db.ref('families/$familyId/reminders').onValue.map((event) {
+    return db.ref('families/$familyId/reminders').onValue.map((event) {
       final data = event.snapshot.value;
       if (data == null) return <Reminder>[];
       final map = Map<String, dynamic>.from(data as Map);

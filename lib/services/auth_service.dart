@@ -8,6 +8,7 @@ import 'package:sign_in_with_apple/sign_in_with_apple.dart';
 import 'package:kakao_flutter_sdk_user/kakao_flutter_sdk_user.dart' as kakao;
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/services.dart';
+import 'firebase_instances_mixin.dart';
 
 /// 인증 서비스 (`Service`) — 소셜 로그인/로그아웃 전담
 ///
@@ -24,10 +25,7 @@ import 'package:flutter/services.dart';
 /// `StreamBuilder`가 자동 감지하여 라우팅을 전환한다.
 ///
 /// RTDB 경로: 직접 접근 없음 (인증만 담당, RTDB 쓰기는 [FamilyService] 등에서 수행)
-class AuthService {
-  /// Firebase Auth 싱글턴 인스턴스
-  final FirebaseAuth _auth = FirebaseAuth.instance;
-
+class AuthService with FirebaseInstancesMixin {
   /// Google 로그인 SDK 인스턴스
   final GoogleSignIn _googleSignIn = GoogleSignIn();
 
@@ -38,13 +36,13 @@ class AuthService {
   /// 현재 로그인된 Firebase 사용자 (`Getter`)
   ///
   /// - **Returns**: `User?` — 로그인 상태이면 User, 아니면 null
-  User? get currentUser => _auth.currentUser;
+  User? get currentUser => auth.currentUser;
 
   /// 로그인 상태 변경 스트림 (`Stream`)
   ///
   /// - **Returns**: `Stream<User?>` — 로그인/로그아웃 시 새 값 방출
   /// - **호출**: app.dart의 StreamBuilder에서 구독하여 PairingGate 분기
-  Stream<User?> get authStateChanges => _auth.authStateChanges();
+  Stream<User?> get authStateChanges => auth.authStateChanges();
 
   // ─── Google ───
 
@@ -66,7 +64,7 @@ class AuthService {
       idToken: googleAuth.idToken,
     );
 
-    final userCredential = await _auth.signInWithCredential(credential);
+    final userCredential = await auth.signInWithCredential(credential);
     print('Google 로그인 성공: ${userCredential.user?.displayName}');
     return userCredential.user;
   }
@@ -98,7 +96,7 @@ class AuthService {
       rawNonce: rawNonce,
     );
 
-    final userCredential = await _auth.signInWithCredential(oauthCredential);
+    final userCredential = await auth.signInWithCredential(oauthCredential);
     print('Apple 로그인 성공: ${userCredential.user?.displayName}');
     return userCredential.user;
   }
@@ -135,7 +133,7 @@ class AuthService {
     });
 
     final customToken = result.data['customToken'] as String;
-    final userCredential = await _auth.signInWithCustomToken(customToken);
+    final userCredential = await auth.signInWithCustomToken(customToken);
     print('카카오 로그인 성공: ${userCredential.user?.uid}');
     return userCredential.user;
   }
@@ -171,7 +169,7 @@ class AuthService {
     });
 
     final customToken = res.data['customToken'] as String;
-    final userCredential = await _auth.signInWithCustomToken(customToken);
+    final userCredential = await auth.signInWithCustomToken(customToken);
     print('네이버 로그인 성공: ${userCredential.user?.uid}');
     return userCredential.user;
   }
@@ -187,7 +185,7 @@ class AuthService {
   /// - **호출**: device_list_screen.dart 우상단 로그아웃 버튼
   Future<void> signOut() async {
     try { await _googleSignIn.signOut(); } catch (_) {}
-    await _auth.signOut();
+    await auth.signOut();
     print('로그아웃 완료');
   }
 

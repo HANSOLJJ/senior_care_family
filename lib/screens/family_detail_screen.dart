@@ -6,6 +6,7 @@ import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
 import '../services/photo_transfer_service.dart';
+import '../widgets/safe_state_mixin.dart';
 // outgoing_call_screen은 MonitoringScreen(callType:"call")으로 통합됨
 import 'photo_upload_screen.dart';
 import 'monitoring_screen.dart';
@@ -64,7 +65,7 @@ class FamilyDetailScreen extends StatefulWidget {
 /// - **액션**: _callDevice, _monitorDevice, _openPhotos, _openVideoReminder
 /// - **관리**: _confirmUnpair, _addFamily
 /// - **UI**: build, _buildDeviceStatusCard, _buildActionButtons 등
-class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
+class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateMixin {
   /// 가족 관련 CRUD 서비스
   final _familyService = FamilyService();
 
@@ -163,7 +164,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
 
       if (data == null) {
         _deviceIds = [];
-        if (mounted) setState(() { _devices = []; _loading = false; });
+        safeSetState(() { _devices = []; _loading = false; });
         return;
       }
 
@@ -211,7 +212,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
       return aOn.compareTo(bOn);
     });
 
-    if (mounted) setState(() { _devices = list; _loading = false; });
+    safeSetState(() { _devices = list; _loading = false; });
   }
 
   /// 통화 상태 실시간 감시 (`Method`)
@@ -254,7 +255,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
           }
         }
       }
-      if (mounted) setState(() => _photoMap..clear()..addAll(newMap));
+      safeSetState(() => _photoMap..clear()..addAll(newMap));
     });
     _subs.add(sub);
   }
@@ -268,7 +269,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> {
   /// - **호출**: _loadData()
   Future<void> _loadMembers() async {
     final members = await _familyService.getFamilyMembers(widget.familyId);
-    if (mounted) setState(() => _members = members);
+    safeSetState(() => _members = members);
   }
 
   // ─── 액션 ───

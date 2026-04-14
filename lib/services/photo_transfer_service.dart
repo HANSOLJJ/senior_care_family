@@ -1,11 +1,12 @@
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import '../config/app_config.dart';
+import 'firebase_instances_mixin.dart';
+import 'network_guard.dart';
 
 /// 사진 전송 서비스 (`Service`) — Family → Storage(임시 버퍼) → Senior 다운로드
 ///
@@ -29,15 +30,7 @@ import '../config/app_config.dart';
 /// Storage 경로:
 ///   - `families/{fid}/temp/{fileName}` — 원본 임시 버퍼 (Senior 다운로드 후 삭제)
 ///   - `families/{fid}/thumbs/{photoId}.jpg` — 썸네일 영구 저장 (photoSync 삭제 시 삭제)
-class PhotoTransferService {
-  /// Firebase RTDB 싱글턴 인스턴스
-  final FirebaseDatabase _db = FirebaseDatabase.instance;
-
-  /// Firebase Storage 싱글턴 인스턴스
-  final FirebaseStorage _storage = FirebaseStorage.instance;
-
-  /// Firebase Auth 싱글턴 인스턴스
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+class PhotoTransferService with FirebaseInstancesMixin {
 
   // ─── 업로드 ───
 
@@ -62,11 +55,11 @@ class PhotoTransferService {
   Future<String> uploadPhoto(String familyId, File imageFile, {
     void Function(double progress)? onProgress,
   }) async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) throw Exception('로그인 필요');
 
     final profile = AppConfig.targetDevice;
-    final photoId = _db.ref().push().key!;
+    final photoId = db.ref().push().key!;
     final creatorName = (user.displayName ?? '가족').replaceAll(RegExp(r'[/\\?%*:|"<>]'), '_');
     final now = DateTime.now();
     final dateTimeStr = '${now.toString().substring(0, 10).replaceAll('-', '')}_${now.hour.toString().padLeft(2, '0')}${now.minute.toString().padLeft(2, '0')}${now.second.toString().padLeft(2, '0')}';
@@ -99,7 +92,7 @@ class PhotoTransferService {
 
     // 4. 원본 Storage 업로드 (임시 버퍼)
     final storagePath = 'families/$familyId/temp/$fileName';
-    final ref = _storage.ref(storagePath);
+    final ref = storage.ref(storagePath);
     final uploadTask = ref.putData(
       Uint8List.fromList(compressed),
       SettableMetadata(contentType: 'image/jpeg'),
@@ -118,7 +111,7 @@ class PhotoTransferService {
 
     // 5. 썸네일 Storage 업로드 (영구 저장)
     final thumbPath = 'families/$familyId/thumbs/$photoId.jpg';
-    final thumbRef = _storage.ref(thumbPath);
+    final thumbRef = storage.ref(thumbPath);
     await thumbRef.putData(
       Uint8List.fromList(thumbBytes),
       SettableMetadata(contentType: 'image/jpeg'),
@@ -130,21 +123,26 @@ class PhotoTransferService {
     // 6. RTDB 메타데이터 등록
     final uploadedByName = user.displayName ?? '가족';
     final label = '$fileName (pending, $uploadedByName)';
-    await _db.ref('families/$familyId/photoSync/$photoId').set({
-      '_label': label,
-      'fileName': fileName,
-      'size': compressed.length,
-      'checksum': checksum,
-      'storageUrl': downloadUrl,
-      'storagePath': storagePath,
-      'thumbUrl': thumbUrl,
-      'thumbPath': thumbPath,
-      'uploadedBy': user.uid,
-      'uploadedByName': uploadedByName,
-      'createdAt': ServerValue.timestamp,
-      'status': 'pending',
-      'retryCount': 0,
-    });
+    final metaRef = db.ref('families/$familyId/photoSync/$photoId');
+    await writeOrTimeout(
+      () => metaRef.set({
+        '_label': label,
+        'fileName': fileName,
+        'size': compressed.length,
+        'checksum': checksum,
+        'storageUrl': downloadUrl,
+        'storagePath': storagePath,
+        'thumbUrl': thumbUrl,
+        'thumbPath': thumbPath,
+        'uploadedBy': user.uid,
+        'uploadedByName': uploadedByName,
+        'createdAt': ServerValue.timestamp,
+        'status': 'pending',
+        'retryCount': 0,
+      }),
+      label: '사진 업로드',
+      onTimeoutCleanup: () => metaRef.remove(),
+    );
     print('RTDB 메타 등록: photoSync/$photoId status=pending, thumbUrl=$thumbUrl');
 
     return photoId;
@@ -165,7 +163,7 @@ class PhotoTransferService {
   /// - **Side Effects**: RTDB `/families/{fid}/photoSync/{photoId}` 노드 삭제
   /// - **호출**: photo_upload_screen.dart의 사진 삭제 버튼
   Future<void> deletePhoto(String familyId, String photoId) async {
-    await _db.ref('families/$familyId/photoSync/$photoId').remove();
+    await db.ref('families/$familyId/photoSync/$photoId').remove();
     print('사진 삭제: $photoId RTDB 노드 제거');
   }
 
@@ -181,5 +179,5 @@ class PhotoTransferService {
   /// - **Returns**: `Stream<DatabaseEvent>` — photoSync 전체 스냅샷 변경 이벤트
   /// - **호출**: photo_upload_screen.dart에서 사진 목록 실시간 갱신
   Stream<DatabaseEvent> watchPhotoSync(String familyId) =>
-      _db.ref('families/$familyId/photoSync').onValue;
+      db.ref('families/$familyId/photoSync').onValue;
 }

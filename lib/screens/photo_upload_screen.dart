@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/photo_transfer_service.dart';
+import '../widgets/safe_state_mixin.dart';
 
 /// 사진 업로드 + 관리 화면 (`StatefulWidget`)
 ///
@@ -35,7 +36,7 @@ class PhotoUploadScreen extends StatefulWidget {
 ///   - 다이얼로그 — _showPickerDialog(), _showPhotoDetail(), _confirmDelete()
 ///   - UI 빌드 — build(), _buildGridTile()
 ///   - 유틸리티 — _statusIcon(), _statusText(), _formatDateFull(), _formatSize()
-class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
+class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMixin {
 
   // ─── 상태 필드 ───
 
@@ -94,7 +95,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
           newMap[id] = _PhotoItem.fromMap(id, info);
         }
       }
-      if (mounted) setState(() => _photoMap..clear()..addAll(newMap));
+      safeSetState(() => _photoMap..clear()..addAll(newMap));
     });
     _subs.add(sub);
   }
@@ -161,7 +162,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> {
           widget.familyId,
           file,
           onProgress: (p) {
-            if (mounted) setState(() => _uploadProgress = p);
+            safeSetState(() => _uploadProgress = p);
           },
         );
         success++;

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../../services/reminder/reminder_service.dart';
+import '../../widgets/safe_state_mixin.dart';
 import 'reminder_edit_screen.dart';
 
 /// 영상 알림 목록 화면 (`StatefulWidget`)
@@ -25,7 +26,7 @@ class ReminderListScreen extends StatefulWidget {
 /// [ReminderListScreen]의 `State`
 ///
 /// ReminderService.watchReminders() 스트림을 구독하여 _reminders 목록 갱신.
-class _ReminderListScreenState extends State<ReminderListScreen> {
+class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateMixin {
 
   // ─── 상태 필드 ───
 
@@ -51,7 +52,7 @@ class _ReminderListScreenState extends State<ReminderListScreen> {
   void initState() {
     super.initState();
     _sub = _service.watchReminders(widget.familyId).listen((list) {
-      if (mounted) setState(() {
+      safeSetState(() {
         _reminders = list;
         _loading = false;
       });

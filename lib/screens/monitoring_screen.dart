@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
+import '../services/network_guard.dart';
 
 /// (`StatefulWidget`) 모니터링 / 통화 통합 화면
 ///
@@ -108,15 +109,21 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
     } else {
       _startMonitoring();
     }
-    // 모니터링 중 다른 가족이 통화 시작하면 전환 버튼 숨김
+    // 모니터링 중 다른 가족이 '통화'(call) 시작하면 전환 버튼 숨김.
+    // 모니터링(monitor)은 N명 동시 가능하므로 막지 않는다 — 내가 모니터링 중이면
+    // Senior가 callStatus.active=true/type=monitor를 쓰는데 그걸 "다른 사람이 통화 중"으로
+    // 오판하지 않도록 type까지 확인.
     if (!_isCall && widget.familyId != null) {
       _callStatusSub = FirebaseDatabase.instance
-          .ref('families/${widget.familyId}/callStatus/active')
+          .ref('families/${widget.familyId}/callStatus')
           .onValue
           .listen((event) {
         if (mounted) {
+          final data = event.snapshot.value as Map?;
+          final active = data?['active'] == true;
+          final type = data?['type'] as String?;
           setState(() {
-            _callActiveByOther = event.snapshot.value == true;
+            _callActiveByOther = active && type == 'call';
           });
         }
       });
@@ -282,9 +289,8 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   void _handleError(Object e) {
     print('연결 실패: $e');
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('연결 실패: $e')),
-      );
+      final msg = e is NetworkException ? e.message : '연결 실패: $e';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
       Navigator.of(context).pop();
     }
   }
@@ -443,6 +449,41 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                   child: const Icon(Icons.call_end, size: 32),
                 ),
               ],
+            ),
+          ),
+
+          // 재연결 오버레이 — peer DISCONNECTED/FAILED 시 표시 (Senior와 동일 문구).
+          // Positioned.fill 로 감싸지 않으면 builder 가 반환하는 SizedBox.shrink 가
+          // non-positioned child 로 취급되어 Stack 이 0×0 으로 collapse 됨 (전체 black 버그).
+          Positioned.fill(
+            child: IgnorePointer(
+              ignoring: true,
+              child: ValueListenableBuilder<bool>(
+                valueListenable: _webrtc.isReconnecting,
+                builder: (context, reconnecting, _) {
+                  if (!reconnecting) return const SizedBox.shrink();
+                  return Container(
+                    color: Colors.black.withOpacity(0.6),
+                    alignment: Alignment.center,
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: const [
+                        CircularProgressIndicator(color: Colors.white),
+                        SizedBox(height: 16),
+                        Text(
+                          '연결이 불안정해요',
+                          style: TextStyle(color: Colors.white, fontSize: 18),
+                        ),
+                        SizedBox(height: 8),
+                        Text(
+                          '잠시만 기다려 주세요...',
+                          style: TextStyle(color: Colors.white70, fontSize: 14),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
             ),
           ),
         ],

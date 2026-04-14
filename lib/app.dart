@@ -2,8 +2,10 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'services/connectivity_service.dart';
 import 'services/family_service.dart';
 import 'services/pairing_helper.dart';
+import 'widgets/offline_overlay.dart';
 import 'screens/login_screen.dart';
 import 'screens/pairing_screen.dart';
 import 'screens/device_list_screen.dart';
@@ -63,6 +65,7 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
   Future<void> _initServices() async {
     // Family 기기는 /devices/에 등록하지 않음
     // 사용자 정보는 /users/{uid}에서 관리
+    ConnectivityService.instance.start();
   }
 
   // ─── UI 빌드 ───
@@ -89,6 +92,7 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
       title: 'Senior Care Family',
       debugShowCheckedModeBanner: false,
       theme: ThemeData.dark(),
+      builder: (context, child) => OfflineOverlay(child: child ?? const SizedBox()),
       home: StreamBuilder<User?>(
         stream: FirebaseAuth.instance.authStateChanges(),
         builder: (context, snapshot) {

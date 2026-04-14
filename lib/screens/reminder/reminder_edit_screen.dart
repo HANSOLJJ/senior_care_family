@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/reminder/reminder_service.dart';
+import '../../widgets/safe_state_mixin.dart';
 
 /// 영상 알림 생성/수정 화면 (`StatefulWidget`)
 ///
@@ -44,7 +45,7 @@ class ReminderEditScreen extends StatefulWidget {
 /// [ReminderEditScreen]의 `State`
 ///
 /// 알림 생성/수정 폼 관리 + 미디어 업로드 + 저장 처리.
-class _ReminderEditScreenState extends State<ReminderEditScreen> {
+class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateMixin {
 
   // ─── 상태 필드 ───
 
@@ -204,7 +205,7 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> {
         );
       }
     } finally {
-      if (mounted) setState(() => _saving = false);
+      safeSetState(() => _saving = false);
     }
   }
 

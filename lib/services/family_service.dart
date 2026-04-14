@@ -1,5 +1,7 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
+import 'firebase_instances_mixin.dart';
+import 'network_guard.dart';
 
 /// 가족 그룹 관리 서비스 (`Service`) — 페어링·멤버·그룹 이름 CRUD
 ///
@@ -15,12 +17,7 @@ import 'package:firebase_database/firebase_database.dart';
 ///   2. [leaveFamily] — 가족 그룹 탈퇴 (멤버 + familyIds + familyNames 삭제)
 ///   3. [watchMyMembership] — Senior에서 멤버 삭제 시 실시간 감지 (강퇴 대응)
 ///   4. [setFamilyName] / [getFamilyNames] — 가족 그룹 사용자 지정 라벨 관리
-class FamilyService {
-  /// Firebase RTDB 싱글턴 인스턴스
-  final FirebaseDatabase _db = FirebaseDatabase.instance;
-
-  /// Firebase Auth 싱글턴 인스턴스
-  final FirebaseAuth _auth = FirebaseAuth.instance;
+class FamilyService with FirebaseInstancesMixin {
 
   // ─── 페어링 ───
 
@@ -38,20 +35,20 @@ class FamilyService {
   ///   - RTDB `/families/{fid}/_label` 업데이트
   /// - **호출**: pairing_screen.dart의 코드 입력 확인 버튼, device_list_screen.dart의 _addFamily()
   Future<String> joinFamily(String pairingCode) async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) throw Exception('로그인 필요');
 
     final code = pairingCode.trim().toUpperCase();
 
     // 1. 코드로 familyId 조회
-    final codeSnap = await _db.ref('pairingCodes/$code').get();
+    final codeSnap = await db.ref('pairingCodes/$code').get();
     if (!codeSnap.exists) {
       throw Exception('유효하지 않은 페어링 코드입니다');
     }
     final familyId = codeSnap.value as String;
 
     // 2. 가족 그룹 존재 확인
-    final familySnap = await _db.ref('families/$familyId').get();
+    final familySnap = await db.ref('families/$familyId').get();
     if (!familySnap.exists) {
       throw Exception('가족 그룹을 찾을 수 없습니다');
     }
@@ -60,20 +57,25 @@ class FamilyService {
     final name = user.displayName ?? '가족';
     final provider = _getProvider(user);
     final label = '$name ($provider:${user.uid})';
-    await _db.ref('families/$familyId/members/${user.uid}').set({
-      '_label': label,
-      'name': name,
-      'role': 'family',
-      'provider': provider,
-      'photoUrl': user.photoURL ?? '',
-      'joinedAt': ServerValue.timestamp,
-    });
+    final memberRef = db.ref('families/$familyId/members/${user.uid}');
+    await writeOrTimeout(
+      () => memberRef.set({
+        '_label': label,
+        'name': name,
+        'role': 'family',
+        'provider': provider,
+        'photoUrl': user.photoURL ?? '',
+        'joinedAt': ServerValue.timestamp,
+      }),
+      label: '가족 참가',
+      onTimeoutCleanup: () => memberRef.remove(),
+    );
 
     // 4. 사용자 프로필에 familyId 추가
-    await _db.ref('users/${user.uid}/familyIds/$familyId').set(true);
+    await db.ref('users/${user.uid}/familyIds/$familyId').set(true);
 
     // 5. 가족 _label 업데이트 (멤버 이름 포함)
-    final familySnap2 = await _db.ref('families/$familyId').get();
+    final familySnap2 = await db.ref('families/$familyId').get();
     final familyData = familySnap2.value as Map?;
     final deviceEntries = familyData?['devices'] as Map?;
     final seniorModel = deviceEntries?.values.first is Map
@@ -82,7 +84,7 @@ class FamilyService {
     final familyLabel = seniorModel.isNotEmpty
         ? '$name의 가족 ($seniorModel)'
         : '$name의 가족';
-    await _db.ref('families/$familyId/_label').set(familyLabel);
+    await db.ref('families/$familyId/_label').set(familyLabel);
 
     print('가족 그룹 참가 완료: $familyId');
     return familyId;
@@ -97,10 +99,10 @@ class FamilyService {
   /// - **Returns**: `List<String>` — familyId 리스트 (비로그인이면 빈 리스트)
   /// - **호출**: app.dart의 PairingGate, device_list_screen.dart 초기화
   Future<List<String>> getMyFamilyIds() async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) return [];
 
-    final snap = await _db.ref('users/${user.uid}/familyIds').get();
+    final snap = await db.ref('users/${user.uid}/familyIds').get();
     if (!snap.exists) return [];
 
     final data = snap.value as Map;
@@ -116,7 +118,7 @@ class FamilyService {
   /// - **Returns**: `List<Map<String, dynamic>>` — 멤버 정보 리스트 (uid 포함)
   /// - **호출**: family_detail_screen.dart 멤버 목록 표시
   Future<List<Map<String, dynamic>>> getFamilyMembers(String familyId) async {
-    final snap = await _db.ref('families/$familyId/members').get();
+    final snap = await db.ref('families/$familyId/members').get();
     if (!snap.exists) return [];
 
     final data = Map<String, dynamic>.from(snap.value as Map);
@@ -139,8 +141,8 @@ class FamilyService {
   /// - **Returns**: `Stream<DatabaseEvent>` — 멤버 노드 변경 이벤트
   /// - **호출**: device_list_screen.dart에서 구독하여 강퇴 감지
   Stream<DatabaseEvent> watchMyMembership(String familyId) {
-    final uid = _auth.currentUser!.uid;
-    return _db.ref('families/$familyId/members/$uid').onValue;
+    final uid = auth.currentUser!.uid;
+    return db.ref('families/$familyId/members/$uid').onValue;
   }
 
   // ─── 가족 이름 관리 ───
@@ -156,9 +158,9 @@ class FamilyService {
   /// - **Side Effects**: RTDB `/users/{uid}/familyNames/{fid}` 에 이름 기록
   /// - **호출**: pairing_helper.dart의 _promptFamilyName()
   Future<void> setFamilyName(String familyId, String name) async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) return;
-    await _db.ref('users/${user.uid}/familyNames/$familyId').set(name);
+    await db.ref('users/${user.uid}/familyNames/$familyId').set(name);
   }
 
   /// 가족 그룹 이름 목록 조회 (`Method`, async)
@@ -168,9 +170,9 @@ class FamilyService {
   /// - **Returns**: `Map<String, String>` — {familyId: 사용자 지정 이름}
   /// - **호출**: device_list_screen.dart에서 가족 목록 표시 시
   Future<Map<String, String>> getFamilyNames() async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) return {};
-    final snap = await _db.ref('users/${user.uid}/familyNames').get();
+    final snap = await db.ref('users/${user.uid}/familyNames').get();
     if (!snap.exists) return {};
     final data = Map<String, dynamic>.from(snap.value as Map);
     return data.map((k, v) => MapEntry(k, v.toString()));
@@ -210,12 +212,12 @@ class FamilyService {
   ///   - RTDB `/users/{uid}/familyNames/{fid}` 삭제
   /// - **호출**: device_list_screen.dart 가족 그룹 탈퇴 메뉴
   Future<void> leaveFamily(String familyId) async {
-    final user = _auth.currentUser;
+    final user = auth.currentUser;
     if (user == null) return;
 
-    await _db.ref('families/$familyId/members/${user.uid}').remove();
-    await _db.ref('users/${user.uid}/familyIds/$familyId').remove();
-    await _db.ref('users/${user.uid}/familyNames/$familyId').remove();
+    await db.ref('families/$familyId/members/${user.uid}').remove();
+    await db.ref('users/${user.uid}/familyIds/$familyId').remove();
+    await db.ref('users/${user.uid}/familyNames/$familyId').remove();
     print('가족 그룹 탈퇴: $familyId');
   }
 }

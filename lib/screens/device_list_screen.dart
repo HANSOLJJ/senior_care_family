@@ -5,6 +5,7 @@ import 'package:firebase_database/firebase_database.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
+import '../widgets/safe_state_mixin.dart';
 import 'family_detail_screen.dart';
 import 'pairing_screen.dart';
 
@@ -47,7 +48,7 @@ class DeviceListScreen extends StatefulWidget {
 /// - **온라인 감시**: 2단계 구독 (기기 목록 → 각 기기 online 필드)
 /// - **네비게이션**: 가족 추가, 가족 상세 화면 전환
 /// - **UI**: build() — 단일/복수 가족 분기 렌더링
-class _DeviceListScreenState extends State<DeviceListScreen> {
+class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin {
   /// 가족 관련 CRUD 서비스
   final _familyService = FamilyService();
 
@@ -105,7 +106,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
   /// - **호출**: initState(), didUpdateWidget(), _addFamily(), _openFamily() 콜백
   Future<void> _loadFamilyNames() async {
     final names = await _familyService.getFamilyNames();
-    if (mounted) setState(() => _familyNames = names);
+    safeSetState(() => _familyNames = names);
   }
 
   // ─── 온라인 감시 ───
@@ -147,7 +148,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> {
           }
         }
         // 초기 로딩 완료
-        if (mounted) setState(() => _loading = false);
+        safeSetState(() => _loading = false);
       });
       _subs.add(sub);
     }

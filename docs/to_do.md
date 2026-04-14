@@ -93,3 +93,22 @@
 ### 복수 Senior 기기 관리
 - [ ] Family 앱에서 알림 생성 시 대상 기기 선택 UI
 - [ ] 기기별 사진 앨범 분리 옵션 (선택적)
+
+### 1 Family - N Senior Device 지원 (Phase 7+, 복잡도 높음)
+
+**현재 한계:** 가족(family) 1개 = Senior 기기 1대 고정. 각 Senior가 부팅 시 자기 family를 `families.push().key`로 생성함. 다른 Senior가 기존 family에 join하는 경로 없음 (PairingActivity 최초 페어링 / 멤버 추가 모드 둘 다 Family 앱 유저 추가 용도).
+
+**필요한 변경:**
+
+- [ ] Senior PairingActivity에 "기존 가족에 합류" 모드 추가 (pairingCode 입력 → 해당 family의 `/devices/{myDid}: true` 등록)
+- [ ] Family 앱에서 "Senior 기기 추가" 버튼 → 기존 family의 pairingCode 재생성 → 새 Senior가 해당 코드로 join
+- [ ] `performFullReset`을 **Leave Family 시맨틱**으로 변경:
+  - 내 device만 `/families/{fid}/devices/{myDid}` 에서 제거
+  - `members=0 && devices=0` (나 제외)일 때만 family 전체 + pairingCode + Storage 삭제
+  - 그 외에는 family 유지 (다른 Senior/멤버 보호)
+- [ ] 사진/알림 UI에서 "어느 Senior에 보낼지" 다중 선택 가능하게 변경 (현재는 family 하나 = 기기 하나 전제)
+- [ ] `callStatus`/모니터링 — Senior 여러 대 중 어느 기기 대상인지 명시 필요
+- [ ] `downloadedBy` 진행률 — Senior N대 중 몇 대 완료인지 표시
+- [ ] RTDB 스키마 영향 검토 (`/families/{fid}/devices/`는 이미 여러 device 수용 가능하게 설계됨 → 큰 변경 없을 듯)
+
+**결정 보류 사유:** 현재는 1 family = 1 Senior 구조가 UI/UX 전반에 깊게 녹아있음 (영상통화 대상, 사진 업로드 대상, 알림 대상이 모두 "그 가족의 단일 Senior"). 이 전제를 풀면 화면 전반에 영향. 시니어 케어 시장에서 실수요 확인된 뒤 착수 권장.
