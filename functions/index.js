@@ -284,18 +284,23 @@ async function doOrphanCleanup({ aggressive = false } = {}) {
   const result = { devices: 0, familyDevices: 0, families: 0, pairingCodes: 0, userRefs: 0, aggressive };
 
   // Step 1: 유령 디바이스 정리
-  // - 기본 모드: online=false + lastSeen 7일 이전
-  // - aggressive 모드: online=false + 소속 family가 members 0명 (재설치로 버려진 고아만 타격)
+  // - 기본 모드: connections 비어있음 + lastSeen 7일 이전
+  // - aggressive 모드: connections 비어있음 + 소속 family가 members 0명 (재설치로 버려진 고아만 타격)
+  // Senior는 Connection List 패턴으로 /devices/{did}/connections/{sessionId} 에 세션 entry를 남긴다.
+  // 서버 keepalive가 해당 세션의 onDisconnect().removeValue()를 발화시키므로,
+  // 실제 살아있는 기기라면 connections에 최소 1개 child가 존재한다.
   const devicesSnap = await db.ref("devices").once("value");
   const devices = devicesSnap.val() || {};
   const activeDeviceIds = new Set();
 
   for (const [deviceId, device] of Object.entries(devices)) {
     const lastSeen = device.lastSeen || 0;
-    const online = device.online || false;
+    const hasConnections =
+      device.connections && Object.keys(device.connections).length > 0;
+
     let removable;
     if (aggressive) {
-      if (online) {
+      if (hasConnections) {
         removable = false;
       } else {
         const fid = device.familyId;
@@ -307,7 +312,7 @@ async function doOrphanCleanup({ aggressive = false } = {}) {
         }
       }
     } else {
-      removable = !online && lastSeen < offlineCutoff;
+      removable = !hasConnections && lastSeen < offlineCutoff;
     }
     if (removable) {
       // /families/{fid}/devices/{did}도 삭제

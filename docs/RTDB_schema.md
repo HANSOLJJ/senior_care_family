@@ -31,12 +31,16 @@
 Firebase RTDB
 │
 ├── /devices/{deviceId}/                        # Senior 기기 전용 레지스트리
-│   ├── _label: string                          # "SM-T500 (senior) [online]"
+│   ├── _label: string                          # "SM-T500 (senior)"
 │   ├── role: "senior"                          # 항상 senior (Family는 등록 안 함)
 │   ├── model: string                           # "SM-T500"
 │   ├── name: string                            # 표시 이름 (기본값 = model)
-│   ├── online: boolean                         # onDisconnect → false
 │   ├── lastSeen: timestamp                     # onDisconnect → ServerValue.TIMESTAMP
+│   ├── connections/                            # Connection List (race-free presence)
+│   │   └── {sessionId}: true                   # Senior가 register 시 UUID 생성.
+│   │                                             onDisconnect().removeValue() 예약 → 끊김 시
+│   │                                             자기 child만 제거 → 타 세션 간섭 불가.
+│   │                                             online 판정: hasChildren() == true
 │   ├── familyId: string | null                 # 소속 가족 (페어링 시 설정)
 │   ├── fcmToken: string                        # FCM 푸시 토큰
 │   ├── appVersion: string                      # "1.0"
@@ -48,7 +52,8 @@ Firebase RTDB
 │
 │   Writer: Senior 앱만
 │   Reader: Family 앱 (기기 상세 정보), Cloud Functions
-│   onDisconnect: online → false, lastSeen → timestamp
+│   onDisconnect: connections/{sessionId} → remove, lastSeen → timestamp
+│   Presence 판정 (Family): connections.hasChildren()
 │
 ├── /calls/{callId}/                            # 영상통화 시그널링 (임시, 통화 종료 후 삭제)
 │   ├── _label: string                          # "홍길동 → SM-T500 (call) ringing"
@@ -250,8 +255,10 @@ families/
 
 ```text
 Step 1: 유령 디바이스 정리
-  /devices/ → offline + lastSeen 7일 경과 → 삭제
+  /devices/ → !hasConnections + lastSeen 7일 경과 → 삭제
   → 해당 /families/{fid}/devices/{did}도 삭제
+  (connections: Senior register 시 /devices/{did}/connections/{sessionId} 기록,
+   끊김 시 onDisconnect().removeValue()로 자동 제거)
 
 Step 2: 가족 내 유령 디바이스 정리
   /families/{fid}/devices/{did} → /devices/{did} 없거나 familyId 불일치 → 삭제
@@ -278,6 +285,17 @@ Step 5: 고아 유저 참조 정리
 | Family 기기 등록 | `/devices/`에 등록하지 않음 → `/users/{uid}`로만 관리 |
 | `registerDevice()` | Family `app_config.dart`에서 삭제 |
 | Senior `onCreate()` | RTDB familyId 검증 추가 (고아 방지) |
+
+## v3 → v4 변경 요약 (Connection List 도입, `online` 필드 제거)
+
+| 변경 | 내용 |
+| --- | --- |
+| `/devices/{did}/connections/{sessionId}` | 신규. Senior 앱 프로세스 세션별 entry. `onDisconnect().removeValue()`로 자기 child만 제거 → onDisconnect race 해소. |
+| `/devices/{did}/online` | **REMOVED**. 단일 boolean + `onDisconnect().setValue(false)` 구조가 stale ghost onDisconnect race에 취약. Family는 `connections.hasChildren()` 으로 판정. |
+| Cloud Functions `cleanupOrphanedData` | orphan 판정 조건을 `!hasConnections && lastSeen 7일`로 전환 (기존 `!online && lastSeen 7일`). |
+| Senior `DeviceRegistration.register()` | `sessionId = UUID.randomUUID()` 매번 생성 / `.info/connected=true` 콜백에서 atomic `updateChildren`으로 `connections` 서브트리 통째 교체 + lastSeen 동반 갱신 / onDisconnect를 data write 이전에 등록 (Firebase 공식 가이드). |
+
+**Family 앱 마이그레이션 이력**: [presence_migration_handover.md](presence_migration_handover.md) — 본 v4 배포로 마이그레이션 완료.
 
 ### 사진 전송 라이프사이클
 

@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../services/call/call_state_machine.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
 import '../services/network_guard.dart';
+import '../widgets/tap_guard.dart';
+import '../widgets/press_scale.dart';
 
 /// (`StatefulWidget`) 모니터링 / 통화 통합 화면
 ///
@@ -23,8 +27,12 @@ class MonitoringScreen extends StatefulWidget {
   /// 연결 대상 Senior 기기 ID (RTDB `/devices/{deviceId}`)
   final String targetDeviceId;
 
-  /// 연결 대상 기기 표시 이름 (연결 대기 UI에 표시)
+  /// 연결 대상 기기 표시 이름 (디버그 fallback 용)
   final String targetDeviceName;
+
+  /// 사용자가 지정한 가족 라벨 (예: "부모님"). UI/다이얼로그에서 기본 표시.
+  /// null이면 [targetDeviceName]로 fallback.
+  final String? familyLabel;
 
   /// 통화 유형: `"monitor"` (CCTV) 또는 `"call"` (영상통화)
   final String callType;
@@ -36,6 +44,7 @@ class MonitoringScreen extends StatefulWidget {
     super.key,
     required this.targetDeviceId,
     required this.targetDeviceName,
+    this.familyLabel,
     this.callType = 'monitor',
     this.familyId,
   });
@@ -74,10 +83,23 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   /// 다른 가족 구성원이 이미 통화 중인지 여부 (통화 전환 버튼 숨김 제어)
   bool _callActiveByOther = false;
 
+  // ─── TapGuard ───
+  final _hangUpGuard = TapGuard();
+  final _upgradeGuard = TapGuard();
+
   // ─── 타이머 / 구독 ───
 
-  /// 연결 타임아웃 타이머 (모니터링 30초, 통화 60초)
-  Timer? _timeoutTimer;
+  /// Phase 1: Senior 도달 확인 (5초). answer 수신 안 오면 다이얼로그.
+  Timer? _phase1Timer;
+
+  /// Phase 2: Senior 수락 대기 (20초, 통화만). 수락 안 오면 다이얼로그.
+  Timer? _phase2Timer;
+
+  /// Phase 2 카운트다운 표시용 (1초마다 _phase2RemainingSec 감소)
+  Timer? _countdownTimer;
+
+  /// Phase 2 남은 초 (UI 표시용)
+  int _phase2RemainingSec = 20;
 
   /// 원격 스트림 수신 확인용 폴링 타이머 (500ms 주기)
   Timer? _connectionCheckTimer;
@@ -88,10 +110,21 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   /// `families/{fid}/callStatus/active` 실시간 감시 구독
   StreamSubscription? _callStatusSub;
 
+  /// 다이얼로그 중복 표시 방지 (같은 phase 내 한 번만)
+  bool _dialogShown = false;
+
+  // ─── Phase 상수 ───
+
+  static const _phase1TimeoutSec = 5;   // Senior 도달 확인 타임아웃
+  static const _phase2TimeoutSec = 20;  // Senior 수락 대기 타임아웃
+
   // ─── 계산 속성 ───
 
   /// (`Getter`) 현재 모드가 통화(call)인지 여부
   bool get _isCall => widget.callType == 'call';
+
+  /// (`Getter`) 표시용 상대 라벨 — familyLabel 우선, 없으면 targetDeviceName
+  String get _displayName => widget.familyLabel ?? widget.targetDeviceName;
 
   // ─── 생명주기 ───
 
@@ -103,7 +136,10 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   void initState() {
     super.initState();
     _webrtc = WebRtcService(_signaling);
-    _webrtc.onCallEnded = _onRemoteEnd;
+    // FSM terminated 감지 — reason 기반으로 dialog/snackbar/pop 분기
+    _webrtc.phase.addListener(_onPhaseChanged);
+    // Phase 1 종료 신호 — Senior 도달 (SDP answer 수신) 감지
+    _webrtc.answerReceived.addListener(_onAnswerReceived);
     if (_isCall) {
       _startCall();
     } else {
@@ -134,10 +170,11 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   /// (`Method`, async) CCTV 모니터링 시작 — 단방향 영상 수신
   ///
-  /// - **Side Effects**: WebRTC 초기화 + 모니터링 발신 + 연결 대기 타이머 시작
+  /// - **Side Effects**: WebRTC 초기화 + 모니터링 발신 + Phase 1 타이머 시작
   /// - **호출**: [initState] (callType="monitor" 시)
   Future<void> _startMonitoring() async {
     try {
+      _startPhase1Timer();
       await _webrtc.initialize();
       final user = FirebaseAuth.instance.currentUser;
       await _webrtc.startMonitoring(
@@ -154,10 +191,11 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   /// (`Method`, async) 영상통화 발신 — RecvOnly로 시작 → Senior 수락 후 양방향 전환
   ///
-  /// - **Side Effects**: WebRTC 초기화 + 통화 발신 + 연결/수락 대기 타이머 시작
+  /// - **Side Effects**: WebRTC 초기화 + 통화 발신 + Phase 1 타이머 시작
   /// - **호출**: [initState] (callType="call" 시)
   Future<void> _startCall() async {
     try {
+      _startPhase1Timer();
       await _webrtc.initialize();
       final user = FirebaseAuth.instance.currentUser;
       await _webrtc.startCall(
@@ -167,7 +205,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         familyId: widget.familyId,
       );
 
-      // 연결되면 수락 대기 UI 표시
+      // 연결되면 수락 대기 UI 표시 (Phase 2 시작은 _onAnswerReceived에서 처리)
       _connectionCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
         if (!mounted) { timer.cancel(); return; }
         if (_webrtc.remoteRenderer.srcObject != null && !_connected) {
@@ -175,41 +213,225 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
           setState(() {
             _connected = true;
             _connecting = false;
-            _waitingAcceptance = true; // Senior 수락 대기
+            _waitingAcceptance = true;
           });
-          _timeoutTimer?.cancel();
           // Senior 수락 후 upgradeToCall 완료 감지
           _watchUpgrade();
         }
-      });
-
-      // 60초 타임아웃
-      _timeoutTimer = Timer(const Duration(seconds: 60), () {
-        if (_connecting && !_connected && mounted) _hangUp();
       });
     } catch (e) {
       _handleError(e);
     }
   }
 
-  /// (`Method`) 연결 대기 — 원격 스트림 수신까지 폴링 + 타임아웃 설정
+  /// (`Method`) 모니터링 연결 대기 — 원격 스트림 수신까지 폴링
   ///
-  /// - **Side Effects**: _timeoutTimer (30초), _connectionCheckTimer (500ms 폴링) 시작
+  /// 모니터링은 Phase 2 없음. answer 수신 → ICE 교환 → 영상 도착 → _connected=true.
+  /// - **Side Effects**: _connectionCheckTimer (500ms 폴링) 시작
   /// - **호출**: [_startMonitoring]
   void _waitForConnection() {
-    // 30초 타임아웃
-    _timeoutTimer = Timer(const Duration(seconds: 30), () {
-      if (_connecting && !_connected && mounted) _hangUp();
-    });
-
     _connectionCheckTimer = Timer.periodic(const Duration(milliseconds: 500), (timer) {
       if (!mounted) { timer.cancel(); return; }
       if (_webrtc.remoteRenderer.srcObject != null && !_connected) {
         timer.cancel();
         setState(() { _connected = true; _connecting = false; });
-        _timeoutTimer?.cancel();
       }
     });
+  }
+
+  // ─── Phase 머신 ───
+
+  /// (`Method`) Phase 1 타이머 시작 — 5초 안에 SDP answer 도착 안 하면 unreachable 종결
+  void _startPhase1Timer() {
+    _phase1Timer?.cancel();
+    _phase1Timer = Timer(const Duration(seconds: _phase1TimeoutSec), () {
+      if (!mounted) return;
+      if (_webrtc.answerReceived.value) return; // 거의 동시 도착 가드
+      _webrtc.hangUp(reason: TerminateReason.unreachable);
+    });
+  }
+
+  /// (`Listener`) WebRtcService.answerReceived 변경 감지 — Phase 1 → Phase 2 전이
+  void _onAnswerReceived() {
+    if (!_webrtc.answerReceived.value) return; // false 리셋 무시
+    if (!mounted) return;
+    _phase1Timer?.cancel();
+    if (_isCall) {
+      _startPhase2Timer();
+    }
+    // monitor: Phase 2 없음. _connectionCheckTimer가 _connected 처리.
+  }
+
+  /// (`Method`) Phase 2 타이머 시작 — 20초 안에 Senior 수락 안 하면 다이얼로그 + 카운트다운
+  void _startPhase2Timer() {
+    _phase2Timer?.cancel();
+    _countdownTimer?.cancel();
+    setState(() { _phase2RemainingSec = _phase2TimeoutSec; });
+    _phase2Timer = Timer(const Duration(seconds: _phase2TimeoutSec), () {
+      if (!mounted) return;
+      if (_upgraded) return; // 거의 동시 수락 가드
+      _webrtc.hangUp(reason: TerminateReason.noAcceptance);
+    });
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() {
+        _phase2RemainingSec = (_phase2RemainingSec - 1).clamp(0, _phase2TimeoutSec);
+      });
+      if (_phase2RemainingSec <= 0) t.cancel();
+    });
+  }
+
+  // ─── FSM phase 리스너 + 종결 UX 핸들러 ───
+
+  /// (`Listener`) [WebRtcService.phase] 변경 감지 — terminated 시 `_handleTerminated` 호출.
+  ///
+  /// terminated 로 전이한 순간 FSM 의 `reason` 필드가 세팅되어 있음.
+  /// addPostFrameCallback 으로 감싸 build 중 setState/dialog race 방지.
+  void _onPhaseChanged() {
+    if (!mounted) return;
+    if (_webrtc.phase.value != CallPhase.terminated) return;
+    final reason = _webrtc.terminateReason;
+    if (reason == null) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _handleTerminated(reason);
+    });
+  }
+
+  /// (`Method`, async) terminated 사유별 UX 매핑 — dialog/snackbar/pop.
+  ///
+  /// 매핑 정책 (plan 의 "terminated.reason → UX 반응 매핑" 표와 동일):
+  /// - userHangup / remoteEnded / orphanCleaned → 즉시 pop
+  /// - unreachable / noAcceptance → 다이얼로그 + 재시도 버튼 → 재시도 or pop
+  /// - iceFailed / networkOffline / remoteBusy / endedByOtherCall / capacityExceeded → 다이얼로그 → pop
+  /// - upgradeFailed → SnackBar 만 (화면 유지)
+  Future<void> _handleTerminated(TerminateReason reason) async {
+    if (_dialogShown || !mounted) return;
+
+    // 즉시 pop — 사용자 의사 표시 or 상대 종료 or race 정리
+    switch (reason) {
+      case TerminateReason.userHangup:
+      case TerminateReason.remoteEnded:
+      case TerminateReason.orphanCleaned:
+        Navigator.of(context).pop();
+        return;
+      case TerminateReason.upgradeFailed:
+        // SnackBar 만 — 화면 유지 (모니터링 계속)
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('통화 전환에 실패했습니다')),
+        );
+        return;
+      default:
+        break;
+    }
+
+    // 다이얼로그 필요 — reason 별 문구 매핑
+    _dialogShown = true;
+    final (title, message, retryable) = _dialogContent(reason);
+    final retry = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(message),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('확인'),
+          ),
+          if (retryable)
+            TextButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('재시도'),
+            ),
+        ],
+      ),
+    );
+    _dialogShown = false;
+    if (!mounted) return;
+    if (retry == true) {
+      _restartCall();
+    } else {
+      Navigator.of(context).pop();
+    }
+  }
+
+  /// (`Utility`) terminated reason → (title, message, retryable) 매핑
+  (String, String, bool) _dialogContent(TerminateReason reason) {
+    switch (reason) {
+      case TerminateReason.unreachable:
+        return (
+          '$_displayName과(와) 통신 연결이 되지 않습니다',
+          '기기가 꺼져 있거나 인터넷이 끊겨 있을 수 있습니다.',
+          true,
+        );
+      case TerminateReason.noAcceptance:
+        return (
+          '$_displayName이(가) 받지 않습니다',
+          '잠시 후 다시 시도해보세요.',
+          true,
+        );
+      case TerminateReason.iceFailed:
+        return (
+          '연결이 끊어졌습니다',
+          '네트워크 상태를 확인해주세요.',
+          false,
+        );
+      case TerminateReason.networkOffline:
+        return (
+          '네트워크에 연결되어 있지 않습니다',
+          '인터넷 연결을 확인하고 다시 시도해주세요.',
+          false,
+        );
+      case TerminateReason.remoteBusy:
+        return (
+          '$_displayName이(가) 통화 중입니다',
+          '다른 가족이 통화 중입니다. 잠시 후 다시 시도해주세요.',
+          false,
+        );
+      case TerminateReason.endedByOtherCall:
+        return (
+          '모니터링이 종료되었습니다',
+          '가족이 영상통화를 시작하여 모니터링이 종료되었습니다.',
+          false,
+        );
+      case TerminateReason.capacityExceeded:
+        return (
+          '모니터링 가능 인원 초과',
+          '현재 최대 인원(3명)이 모니터링 중입니다.',
+          false,
+        );
+      default:
+        return ('연결 종료', '세션이 종료되었습니다.', false);
+    }
+  }
+
+  /// (`Method`) 재시도 — WebRtcService 재생성 + 모든 상태/타이머 리셋 + 발신 재시작
+  void _restartCall() {
+    _phase1Timer?.cancel();
+    _phase2Timer?.cancel();
+    _countdownTimer?.cancel();
+    _connectionCheckTimer?.cancel();
+    _upgradeCheckTimer?.cancel();
+    _webrtc.answerReceived.removeListener(_onAnswerReceived);
+    _webrtc.phase.removeListener(_onPhaseChanged);
+    _webrtc.dispose();
+
+    setState(() {
+      _connected = false;
+      _connecting = true;
+      _upgraded = false;
+      _waitingAcceptance = false;
+      _phase2RemainingSec = _phase2TimeoutSec;
+    });
+
+    _webrtc = WebRtcService(_signaling);
+    _webrtc.phase.addListener(_onPhaseChanged);
+    _webrtc.answerReceived.addListener(_onAnswerReceived);
+    if (_isCall) {
+      _startCall();
+    } else {
+      _startMonitoring();
+    }
   }
 
   /// (`Method`) Senior 수락 후 양방향 전환 완료 감지
@@ -222,6 +444,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
       if (!mounted) { timer.cancel(); return; }
       if (!_webrtc.isMonitoring && _waitingAcceptance) {
         timer.cancel();
+        // Senior 수락 완료 — Phase 2 종료
+        _phase2Timer?.cancel();
+        _countdownTimer?.cancel();
         setState(() {
           _upgraded = true;
           _waitingAcceptance = false;
@@ -232,22 +457,16 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   // ─── 통화 제어 ───
 
-  /// (`Callback`) 상대방(Senior)이 통화를 종료했을 때 호출
-  ///
-  /// - **Side Effects**: 현재 화면 pop
-  /// - **호출**: WebRtcService.onCallEnded 콜백
-  void _onRemoteEnd() {
-    if (mounted) Navigator.of(context).pop();
-  }
-
   /// (`Method`, async) 통화/모니터링 종료 — 리소스 정리 + 화면 pop
   ///
-  /// - **Side Effects**: 타이머 취소, WebRTC hangUp, 화면 pop
-  /// - **호출**: 종료 버튼, 타임아웃
+  /// FSM terminated 전이는 [WebRtcService.hangUp] 이 수행. 본 함수에선
+  /// 타이머 취소만 하고 hangUp 호출. Navigator.pop 은 `_handleTerminated` 가 담당.
+  /// - **호출**: 종료 버튼
   Future<void> _hangUp() async {
-    _timeoutTimer?.cancel();
-    await _webrtc.hangUp();
-    if (mounted) Navigator.of(context).pop();
+    _phase1Timer?.cancel();
+    _phase2Timer?.cancel();
+    _countdownTimer?.cancel();
+    await _webrtc.hangUp(reason: TerminateReason.userHangup);
   }
 
   /// (`Method`, async) 모니터링 → 양방향 통화 수동 전환
@@ -270,8 +489,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
       });
     } catch (e) {
       if (mounted) {
+        // FSM 은 termintate 하지 않고 SnackBar 만 — plan 의 "upgradeFailed" UX 정책
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('통화 전환 실패: $e')),
+          const SnackBar(content: Text('통화 전환에 실패했습니다')),
         );
         setState(() => _upgraded = false);
       }
@@ -302,10 +522,16 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   /// - **호출**: Flutter 프레임워크 (위젯 소멸 시)
   @override
   void dispose() {
-    _timeoutTimer?.cancel();
+    _hangUpGuard.dispose();
+    _upgradeGuard.dispose();
+    _phase1Timer?.cancel();
+    _phase2Timer?.cancel();
+    _countdownTimer?.cancel();
     _connectionCheckTimer?.cancel();
     _upgradeCheckTimer?.cancel();
     _callStatusSub?.cancel();
+    _webrtc.answerReceived.removeListener(_onAnswerReceived);
+    _webrtc.phase.removeListener(_onPhaseChanged);
     _webrtc.dispose();
     _signaling.dispose();
     super.dispose();
@@ -368,7 +594,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                   ),
                   const SizedBox(height: 24),
                   Text(
-                    widget.targetDeviceName,
+                    _displayName,
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 24,
@@ -377,7 +603,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                   ),
                   const SizedBox(height: 12),
                   Text(
-                    _isCall ? '연결 중...' : '모니터링 연결 중...',
+                    _isCall ? '호출 중...' : '모니터링 연결 중...',
                     style: const TextStyle(color: Colors.white70, fontSize: 16),
                   ),
                   const SizedBox(height: 24),
@@ -413,7 +639,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                     Text(
                       _upgraded
                           ? '통화 중'
-                          : (_waitingAcceptance ? '수락 대기 중...' : '모니터링'),
+                          : (_waitingAcceptance
+                              ? '$_displayName 수락 대기 ($_phase2RemainingSec초)'
+                              : '모니터링'),
                       style: const TextStyle(color: Colors.white, fontSize: 14),
                     ),
                   ],
@@ -433,35 +661,57 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                 if (_connected && !_isCall && !_upgraded && !_callActiveByOther)
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: FloatingActionButton.extended(
-                      heroTag: 'upgrade',
-                      onPressed: _upgradeToCall,
-                      backgroundColor: Colors.green,
-                      icon: const Icon(Icons.videocam),
-                      label: const Text('통화 전환'),
+                    child: ValueListenableBuilder<bool>(
+                      valueListenable: _upgradeGuard.isBusy,
+                      builder: (context, busy, _) => PressScale(
+                        onTap: busy
+                            ? null
+                            : () {
+                                HapticFeedback.lightImpact();
+                                _upgradeGuard.run(_upgradeToCall);
+                              },
+                        child: FloatingActionButton.extended(
+                          heroTag: 'upgrade',
+                          onPressed: null, // PressScale에서 처리
+                          backgroundColor: Colors.green,
+                          icon: const Icon(Icons.videocam),
+                          label: const Text('통화 전환'),
+                        ),
+                      ),
                     ),
                   ),
                 // 종료 버튼
-                FloatingActionButton(
-                  heroTag: 'hangup',
-                  onPressed: _hangUp,
-                  backgroundColor: Colors.red,
-                  child: const Icon(Icons.call_end, size: 32),
+                ValueListenableBuilder<bool>(
+                  valueListenable: _hangUpGuard.isBusy,
+                  builder: (context, busy, _) => PressScale(
+                    onTap: busy
+                        ? null
+                        : () {
+                            HapticFeedback.mediumImpact();
+                            _hangUpGuard.run(_hangUp);
+                          },
+                    child: FloatingActionButton(
+                      heroTag: 'hangup',
+                      onPressed: null, // PressScale에서 처리
+                      backgroundColor: Colors.red,
+                      child: const Icon(Icons.call_end, size: 32),
+                    ),
+                  ),
                 ),
               ],
             ),
           ),
 
-          // 재연결 오버레이 — peer DISCONNECTED/FAILED 시 표시 (Senior와 동일 문구).
+          // 재연결 오버레이 — FSM phase==reconnecting 시 표시 (plan UX 계약 매핑).
           // Positioned.fill 로 감싸지 않으면 builder 가 반환하는 SizedBox.shrink 가
           // non-positioned child 로 취급되어 Stack 이 0×0 으로 collapse 됨 (전체 black 버그).
           Positioned.fill(
             child: IgnorePointer(
               ignoring: true,
-              child: ValueListenableBuilder<bool>(
-                valueListenable: _webrtc.isReconnecting,
-                builder: (context, reconnecting, _) {
-                  if (!reconnecting) return const SizedBox.shrink();
+              child: ValueListenableBuilder<CallPhase>(
+                valueListenable: _webrtc.phase,
+                builder: (context, phase, _) {
+                  if (phase != CallPhase.reconnecting) return const SizedBox.shrink();
                   return Container(
                     color: Colors.black.withOpacity(0.6),
                     alignment: Alignment.center,

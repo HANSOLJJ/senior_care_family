@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/auth_service.dart';
+import '../widgets/press_scale.dart';
 
 /// 소셜 로그인 화면 (`StatefulWidget`)
 ///
@@ -49,6 +51,8 @@ class _LoginScreenState extends State<LoginScreen> {
   /// - **Side Effects**: [_loading], [_error] 상태 변경
   /// - **호출**: 각 _LoginButton의 onTap
   Future<void> _handleSignIn(String provider, Future<User?> Function() signInFn) async {
+    if (_loading) return; // double-tap 차단 (이미 진행 중이면 무시)
+    HapticFeedback.lightImpact();
     setState(() { _loading = true; _error = null; });
     try {
       final user = await signInFn();
@@ -192,19 +196,22 @@ class _LoginButton extends StatelessWidget {
   /// - **Returns**: `Widget` — 전체 너비 ElevatedButton.icon
   @override
   Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-      height: 48,
-      child: ElevatedButton.icon(
-        onPressed: onTap,
-        icon: Icon(icon, color: textColor, size: 24),
-        label: Text(
-          label,
-          style: TextStyle(color: textColor, fontSize: 16, fontWeight: FontWeight.w600),
-        ),
-        style: ElevatedButton.styleFrom(
-          backgroundColor: color,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+    return PressScale(
+      onTap: onTap,
+      child: SizedBox(
+        width: double.infinity,
+        height: 48,
+        child: ElevatedButton.icon(
+          onPressed: onTap,
+          icon: Icon(icon, color: textColor, size: 24),
+          label: Text(
+            label,
+            style: TextStyle(color: textColor, fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+          style: ElevatedButton.styleFrom(
+            backgroundColor: color,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
         ),
       ),
     );

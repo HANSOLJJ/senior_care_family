@@ -1,11 +1,14 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
-import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'package:firebase_database/firebase_database.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
+import '../services/presence_util.dart';
 import '../widgets/safe_state_mixin.dart';
+import '../widgets/tap_guard.dart';
+import '../widgets/press_scale.dart';
 import 'family_detail_screen.dart';
 import 'pairing_screen.dart';
 
@@ -14,10 +17,10 @@ import 'pairing_screen.dart';
 /// familyIds 1개 → FamilyDetailScreen 직접 렌더링 (목록 건너뜀)
 /// familyIds 2개+ → Card 목록 표시, 각 카드에 온라인 상태(초록/회색 원)
 ///
-/// 온라인 감시 구조:
+/// 온라인 감시 구조 (Connection List 기반):
 ///   /families/{fid}/devices/ onValue → deviceId 목록 추출
-///   → 각 /devices/{did}/online onValue → _updateOnlineStatus()
-///   → 가족 그룹 내 하나라도 online이면 초록 원
+///   → 각 /devices/{did}/connections onValue → _updateOnlineStatus()
+///   → 가족 그룹 내 하나라도 connections 자식 보유하면 초록 원
 ///
 /// 메뉴: 가족 추가(PairingScreen), 로그아웃
 ///
@@ -45,10 +48,11 @@ class DeviceListScreen extends StatefulWidget {
 ///
 /// ## 섹션 구성
 /// - **데이터 로드**: 가족 이름 조회, RTDB 구독 관리
-/// - **온라인 감시**: 2단계 구독 (기기 목록 → 각 기기 online 필드)
+/// - **온라인 감시**: 2단계 구독 (기기 목록 → 각 기기 connections 필드)
 /// - **네비게이션**: 가족 추가, 가족 상세 화면 전환
 /// - **UI**: build() — 단일/복수 가족 분기 렌더링
-class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin {
+class _DeviceListScreenState extends State<DeviceListScreen>
+    with SafeStateMixin, WidgetsBindingObserver {
   /// 가족 관련 CRUD 서비스
   final _familyService = FamilyService();
 
@@ -64,6 +68,10 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
   /// 데이터 초기 로딩 중 여부
   bool _loading = true;
 
+  // ─── TapGuard (double-tap 차단) ───
+  final _menuGuard = TapGuard();
+  final _openFamilyGuard = TapGuard();
+
   // ─── 라이프사이클 ───
 
   /// 초기화 — 가족 이름 로드 + 기기 온라인 감시 시작 (`Lifecycle`)
@@ -73,8 +81,23 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadFamilyNames();
     _watchAllDevices();
+  }
+
+  /// (`Lifecycle`) 앱 resume 시 모든 가족의 online 상태 강제 재조회
+  ///
+  /// 백그라운드에서 Firebase WebSocket이 끊겼다 복귀하는 동안 onValue가
+  /// stale 값을 들고 있을 수 있어, resume 시 RTDB `.get()`으로 다시 읽어옴.
+  /// Senior 측 60s heartbeat가 있어 약간 stale이어도 곧 fresh 값 도달.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      for (final fid in widget.familyIds) {
+        _updateOnlineStatus(fid);
+      }
+    }
   }
 
   /// familyIds 변경 감지 — 구독 재설정 (`Lifecycle`)
@@ -111,13 +134,13 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
 
   // ─── 온라인 감시 ───
 
-  /// familyId → 해당 가족의 각 기기 online 감시 구독 목록 (2단계)
+  /// familyId → 해당 가족의 각 기기 connections 감시 구독 목록 (2단계)
   final Map<String, List<StreamSubscription>> _deviceOnlineSubs = {};
 
   /// 모든 가족 그룹의 기기 온라인 상태를 2단계로 실시간 감시 (`Method`)
   ///
   /// 1단계: /families/{fid}/devices/ onValue → 기기 목록 추출
-  /// 2단계: 각 /devices/{did}/online onValue → _updateOnlineStatus() 호출
+  /// 2단계: 각 /devices/{did}/connections onValue → _updateOnlineStatus() 호출
   ///
   /// - **Side Effects**: _subs, _deviceOnlineSubs에 구독 추가, _loading → false
   /// - **호출**: initState(), didUpdateWidget()
@@ -129,17 +152,17 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
           .onValue
           .listen((event) {
         final data = event.snapshot.value;
-        // 기존 기기 online 구독 해제
+        // 기존 기기 connections 구독 해제
         for (final s in _deviceOnlineSubs[familyId] ?? []) {
           s.cancel();
         }
         _deviceOnlineSubs[familyId] = [];
 
         if (data != null && data is Map) {
-          // 2) 각 /devices/{did}/online 실시간 감시
+          // 2) 각 /devices/{did}/connections 실시간 감시
           for (final deviceId in data.keys) {
             final onlineSub = FirebaseDatabase.instance
-                .ref('devices/$deviceId/online')
+                .ref('devices/$deviceId/connections')
                 .onValue
                 .listen((onlineEvent) {
               _updateOnlineStatus(familyId);
@@ -156,7 +179,7 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
 
   /// 특정 가족 그룹의 온라인 기기 존재 여부를 RTDB에서 재확인 (`Method`, async)
   ///
-  /// /families/{fid}/devices/ 목록을 순회하며 하나라도 online이면 true.
+  /// /families/{fid}/devices/ 목록을 순회하며 connections 자식 보유한 기기 1개 이상이면 true.
   ///
   /// - **Params**:
   ///   - [familyId] — 확인할 가족 그룹 ID
@@ -170,8 +193,8 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
     bool hasOnline = false;
     if (data != null && data is Map) {
       for (final deviceId in data.keys) {
-        final snap = await FirebaseDatabase.instance.ref('devices/$deviceId/online').get();
-        if (snap.value == true) {
+        final snap = await FirebaseDatabase.instance.ref('devices/$deviceId/connections').get();
+        if (PresenceUtil.isOnlineFromSnapshot(snap)) {
           hasOnline = true;
           break;
         }
@@ -207,8 +230,8 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
   ///
   /// - **Side Effects**: Navigator push, onAddFamily 콜백, _familyNames 갱신
   /// - **호출**: PopupMenuButton 'add' 선택 시
-  void _addFamily() {
-    Navigator.of(context).push(
+  Future<void> _addFamily() async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PairingScreen(
           onPairedWithId: (familyId) async {
@@ -230,8 +253,8 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
   ///   - [name] — 가족 이름 (AppBar 제목용)
   /// - **Side Effects**: Navigator push
   /// - **호출**: 가족 카드 onTap
-  void _openFamily(String familyId, String name) {
-    Navigator.of(context).push(
+  Future<void> _openFamily(String familyId, String name) async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => FamilyDetailScreen(
           familyId: familyId,
@@ -251,6 +274,9 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
   /// - **호출**: 위젯 제거 시 Flutter 프레임워크에 의해
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _menuGuard.dispose();
+    _openFamilyGuard.dispose();
     for (final sub in _subs) {
       sub.cancel();
     }
@@ -300,8 +326,9 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
             icon: const Icon(Icons.more_vert, color: Colors.white70),
             color: Colors.grey[900],
             onSelected: (value) {
-              if (value == 'add') _addFamily();
-              if (value == 'logout') AuthService().signOut();
+              HapticFeedback.selectionClick();
+              if (value == 'add') _menuGuard.run(_addFamily);
+              if (value == 'logout') _menuGuard.run(() async => AuthService().signOut());
             },
             itemBuilder: (_) => [
               const PopupMenuItem(
@@ -326,28 +353,40 @@ class _DeviceListScreenState extends State<DeviceListScreen> with SafeStateMixin
                 final name = _familyLabel(familyId, index);
                 final isOnline = _onlineStatus[familyId] ?? false;
 
-                return Card(
-                  color: Colors.grey[900],
-                  margin: const EdgeInsets.only(bottom: 12),
-                  child: ListTile(
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 12,
-                    ),
-                    title: Text(
-                      name,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+                return ValueListenableBuilder<bool>(
+                  valueListenable: _openFamilyGuard.isBusy,
+                  builder: (context, busy, _) => PressScale(
+                    onTap: busy
+                        ? null
+                        : () {
+                            HapticFeedback.lightImpact();
+                            _openFamilyGuard
+                                .run(() => _openFamily(familyId, name));
+                          },
+                    child: Card(
+                      color: Colors.grey[900],
+                      margin: const EdgeInsets.only(bottom: 12),
+                      child: ListTile(
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 12,
+                        ),
+                        title: Text(
+                          name,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        trailing: Icon(
+                          Icons.circle,
+                          color: isOnline ? Colors.green : Colors.grey[600],
+                          size: 14,
+                        ),
+                        onTap: null,
                       ),
                     ),
-                    trailing: Icon(
-                      Icons.circle,
-                      color: isOnline ? Colors.green : Colors.grey[600],
-                      size: 14,
-                    ),
-                    onTap: () => _openFamily(familyId, name),
                   ),
                 );
               },

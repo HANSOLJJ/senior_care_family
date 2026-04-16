@@ -118,19 +118,32 @@ class SignalingService {
 
   /// (`Stream`) 통화 종료 감시 (발신측 — 상대방이 끊었는지 확인)
   ///
-  /// status가 "ended"로 변경되면 콜백 호출.
+  /// `/calls/{cid}/status` 가 `"ended"` 로 변경되면 콜백 호출.
+  /// `endReason` 서브필드도 함께 읽어 콜백에 전달하여 세부 사유 (`remoteBusy`/
+  /// `capacityExceeded`/`otherCallStarted`/`normal`) 를 매핑할 수 있게 한다.
   /// - **Params**:
   ///   - [callId] — 감시할 통화 ID
-  ///   - [onCallEnded] — 종료 감지 시 콜백
+  ///   - [onCallEnded] — 종료 감지 시 콜백. endReason 전달 (없으면 null).
   /// - **Returns**: `StreamSubscription` — 호출자가 보관 후 hangUp/dispose 시 cancel
   /// - **호출**: WebRtcService.makeCall, answerCall, startMonitoring, startCall
-  StreamSubscription listenForCallEnd(String callId, void Function() onCallEnded) {
-    return _db.child('calls/$callId/status').onValue.listen((event) {
+  StreamSubscription listenForCallEnd(
+    String callId,
+    void Function(String? endReason) onCallEnded,
+  ) {
+    // status 경로만 구독 (ICE candidate push 등 무관한 변경에 안 반응).
+    // "ended" 감지 시 endReason 을 1회 get 으로 조회.
+    return _db.child('calls/$callId/status').onValue.listen((event) async {
       final status = event.snapshot.value as String?;
-      if (status == 'ended') {
-        print('시그널링: 상대방이 통화 종료 callId=$callId');
-        onCallEnded();
+      if (status != 'ended') return;
+      String? endReason;
+      try {
+        final snap = await _db.child('calls/$callId/endReason').get();
+        endReason = snap.value as String?;
+      } catch (_) {
+        endReason = null;
       }
+      print('시그널링: 상대방이 통화 종료 callId=$callId endReason=$endReason');
+      onCallEnded(endReason);
     });
   }
 
@@ -207,17 +220,8 @@ class SignalingService {
     _currentCallId = callId;
     _currentFamilyId = targetFamilyId;
 
-    // families/{fid}/callStatus 기록 (통화 중 표시 — callType="call" 전용)
-    // 모니터링은 Senior MonitoringSession이 count-aware하게 관리하므로 Family에서 건드리지 않음
-    if (targetFamilyId != null && callType == 'call') {
-      await _db.child('families/$targetFamilyId/callStatus').set({
-        'active': true,
-        'type': callType,
-        'callId': callId,
-        'callerName': name,
-        'startedAt': ServerValue.timestamp,
-      });
-    }
+    // `callStatus` 는 Senior 가 IN_CALL 진입 시 유일 writer (plan FSM v2 정책).
+    // Family 는 [endCall] 에서 active=false 로 내릴 권리만 보유 (UX 즉시 반영).
 
     print('시그널링: ${callType == "monitor" ? "모니터링" : "통화"} 생성 callId=$callId → target=$targetDeviceId');
     return callId;

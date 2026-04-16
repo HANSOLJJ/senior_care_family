@@ -16,6 +16,51 @@
 
 ---
 
+## WebRtc 상태 관리 정식 리팩토링 (후속)
+
+현재 `WebRtcService._CallState` enum은 race 차단용 **임시 방편**.
+(2026-04-15 도입 — `upgradeToCall` 중 `_callId!` null-assertion crash 방지)
+
+다음 후속 작업:
+
+- [ ] `CallStateMachine` 클래스로 분리 (transition 매트릭스 + 검증)
+- [ ] invariant 단위 테스트 (`test/services/call_state_machine_test.dart`)
+- [ ] 각 transition 시 logging hook으로 trace 가능하게
+- [ ] `WebRtcService` 메서드 진입부에서 transition 호출, 위반 시 throw
+- [ ] Senior 측 `MonitoringSession`에도 같은 패턴 적용 검토
+
+선행 조건: 현재 enum 도입 후 1~2주 실사용 + 다른 race 케이스 추가 발견 시 종합 설계.
+
+제안 구조:
+```dart
+enum CallState { idle, connecting, connected, upgrading, ending }
+
+class CallStateMachine {
+  CallState _current = CallState.idle;
+  final void Function(CallState from, CallState to)? onTransition;
+
+  bool transition(CallState to) {
+    if (!_allowedTransitions[_current]!.contains(to)) {
+      return false;
+    }
+    final from = _current;
+    _current = to;
+    onTransition?.call(from, to);
+    return true;
+  }
+
+  static const _allowedTransitions = {
+    CallState.idle: [CallState.connecting, CallState.ending],
+    CallState.connecting: [CallState.connected, CallState.ending],
+    CallState.connected: [CallState.upgrading, CallState.ending],
+    CallState.upgrading: [CallState.connected, CallState.ending],
+    CallState.ending: [],
+  };
+}
+```
+
+---
+
 ## 즉시 수정 필요 (버그)
 
 ### 두 번째 가족 추가 시 무한 로딩

@@ -1,10 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/photo_transfer_service.dart';
 import '../widgets/safe_state_mixin.dart';
+import '../widgets/tap_guard.dart';
+import '../widgets/press_scale.dart';
 
 /// 사진 업로드 + 관리 화면 (`StatefulWidget`)
 ///
@@ -63,6 +66,10 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
 
   /// 현재 업로드 중인 파일 순번 (1-based)
   int _uploadCurrent = 0;
+
+  // ─── TapGuard ───
+  final _pickerGuard = TapGuard();
+  final _deleteGuard = TapGuard();
 
   @override
   void initState() {
@@ -201,12 +208,20 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
             ListTile(
               leading: const Icon(Icons.photo_library, color: Colors.white),
               title: const Text('갤러리에서 선택 (여러 장)', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _pickMultiAndUpload(); },
+              onTap: () {
+                HapticFeedback.lightImpact();
+                Navigator.pop(context);
+                _pickerGuard.run(_pickMultiAndUpload);
+              },
             ),
             ListTile(
               leading: const Icon(Icons.camera_alt, color: Colors.white),
               title: const Text('카메라로 촬영', style: TextStyle(color: Colors.white)),
-              onTap: () { Navigator.pop(context); _pickCameraAndUpload(); },
+              onTap: () {
+                HapticFeedback.lightImpact();
+                Navigator.pop(context);
+                _pickerGuard.run(_pickCameraAndUpload);
+              },
             ),
           ],
         ),
@@ -330,8 +345,9 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
           TextButton(onPressed: () => Navigator.pop(context), child: const Text('취소')),
           TextButton(
             onPressed: () {
+              HapticFeedback.mediumImpact();
               Navigator.pop(context);
-              _service.deletePhoto(widget.familyId, photoId);
+              _deleteGuard.run(() => _service.deletePhoto(widget.familyId, photoId));
             },
             child: const Text('삭제', style: TextStyle(color: Colors.red)),
           ),
@@ -343,6 +359,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   /// RTDB 구독 해제 (`Lifecycle`)
   @override
   void dispose() {
+    _pickerGuard.dispose();
+    _deleteGuard.dispose();
     for (final sub in _subs) {
       sub.cancel();
     }
@@ -421,11 +439,19 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
         ],
       ),
       // 사진 추가 FAB (업로드 중이면 비활성)
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _uploading ? null : _showPickerDialog,
-        icon: const Icon(Icons.add_photo_alternate),
-        label: const Text('사진 보내기'),
-        backgroundColor: _uploading ? Colors.grey : Colors.blue,
+      floatingActionButton: PressScale(
+        onTap: _uploading
+            ? null
+            : () {
+                HapticFeedback.lightImpact();
+                _showPickerDialog();
+              },
+        child: FloatingActionButton.extended(
+          onPressed: _uploading ? null : _showPickerDialog,
+          icon: const Icon(Icons.add_photo_alternate),
+          label: const Text('사진 보내기'),
+          backgroundColor: _uploading ? Colors.grey : Colors.blue,
+        ),
       ),
     );
   }

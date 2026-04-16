@@ -1,8 +1,10 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/reminder/reminder_service.dart';
 import '../../widgets/safe_state_mixin.dart';
+import '../../widgets/press_scale.dart';
 
 /// 영상 알림 생성/수정 화면 (`StatefulWidget`)
 ///
@@ -79,6 +81,9 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
   /// 저장 진행 중 여부
   bool _saving = false;
 
+  /// 미디어 선택(picker) 진행 중 여부 — double-tap 차단
+  bool _picking = false;
+
   /// 업로드 진행률 (0.0 ~ 1.0)
   double _uploadProgress = 0;
 
@@ -144,19 +149,26 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
   /// - **Side Effects**: _mediaFile, _mediaType 갱신
   /// - **호출**: _buildMediaPicker 내 버튼
   Future<void> _pickMedia({required bool fromCamera}) async {
-    final source =
-        fromCamera ? ImageSource.camera : ImageSource.gallery;
+    if (_picking || _saving) return; // double-tap 차단
+    _picking = true;
+    HapticFeedback.lightImpact();
+    try {
+      final source =
+          fromCamera ? ImageSource.camera : ImageSource.gallery;
 
-    final picked = await _picker.pickVideo(
-      source: source,
-      maxDuration: const Duration(seconds: 60),
-    );
-    if (picked == null) return;
+      final picked = await _picker.pickVideo(
+        source: source,
+        maxDuration: const Duration(seconds: 60),
+      );
+      if (picked == null) return;
 
-    setState(() {
-      _mediaFile = File(picked.path);
-      _mediaType = 'video';
-    });
+      setState(() {
+        _mediaFile = File(picked.path);
+        _mediaType = 'video';
+      });
+    } finally {
+      _picking = false;
+    }
   }
 
   // ─── 저장 ───
@@ -170,6 +182,7 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
   /// - **호출**: 저장 버튼 onPressed
   Future<void> _save() async {
     if (!_canSave) return;
+    HapticFeedback.lightImpact();
     setState(() => _saving = true);
 
     try {
@@ -269,12 +282,15 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
                 padding: const EdgeInsets.only(bottom: 12),
                 child: LinearProgressIndicator(value: _uploadProgress),
               ),
-            SizedBox(
-              width: double.infinity,
-              height: 48,
-              child: ElevatedButton(
-                onPressed: _canSave ? _save : null,
-                child: Text(_saving ? '저장 중...' : '저장'),
+            PressScale(
+              onTap: _canSave ? _save : null,
+              child: SizedBox(
+                width: double.infinity,
+                height: 48,
+                child: ElevatedButton(
+                  onPressed: _canSave ? _save : null,
+                  child: Text(_saving ? '저장 중...' : '저장'),
+                ),
               ),
             ),
           ],
@@ -344,18 +360,24 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
         Row(
           children: [
             Expanded(
-              child: OutlinedButton.icon(
-                onPressed: _saving ? null : () => _pickMedia(fromCamera: true),
-                icon: const Icon(Icons.videocam),
-                label: const Text('녹화'),
+              child: PressScale(
+                onTap: _saving ? null : () => _pickMedia(fromCamera: true),
+                child: OutlinedButton.icon(
+                  onPressed: _saving ? null : () => _pickMedia(fromCamera: true),
+                  icon: const Icon(Icons.videocam),
+                  label: const Text('녹화'),
+                ),
               ),
             ),
             const SizedBox(width: 8),
             Expanded(
-              child: OutlinedButton.icon(
-                onPressed: _saving ? null : () => _pickMedia(fromCamera: false),
-                icon: const Icon(Icons.folder_open),
-                label: const Text('갤러리'),
+              child: PressScale(
+                onTap: _saving ? null : () => _pickMedia(fromCamera: false),
+                child: OutlinedButton.icon(
+                  onPressed: _saving ? null : () => _pickMedia(fromCamera: false),
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('갤러리'),
+                ),
               ),
             ),
           ],

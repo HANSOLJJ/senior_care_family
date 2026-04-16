@@ -3,12 +3,14 @@ import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import '../../config/app_config.dart';
+import 'call_state_machine.dart';
 import 'signaling_service.dart';
 
 /// ICE 서버 설정 — STUN(Google) + TURN(metered.ca)
 ///
 /// NAT/방화벽 환경에서 P2P 연결을 위해 STUN으로 공인 IP 확인,
 /// STUN 실패 시 TURN 릴레이 서버를 통해 미디어 중계.
+
 const _iceServers = {
   'iceServers': [
     {'urls': 'stun:stun.l.google.com:19302'},
@@ -67,8 +69,20 @@ class WebRtcService {
   /// 현재 활성 통화 ID
   String? _callId;
 
-  /// hangUp 중복 호출 방지 플래그
-  bool _isHungUp = false;
+  /// 통화 생명주기 상태 머신 — async race 차단 + UX 종결 사유 매핑.
+  ///
+  /// `terminate(reason)` 이 가장 먼저 세팅 → 다른 async 경로가 `_isEnding` 가드로 즉시 종료.
+  /// MonitoringScreen 이 `phase` ValueNotifier 를 구독하여 배너/다이얼로그/pop 분기.
+  final CallStateMachine _fsm = CallStateMachine();
+
+  /// 다른 async 경로의 early-return 가드 — `terminating`/`terminated` 면 true.
+  bool get _isEnding => _fsm.isEnding;
+
+  /// (`Getter`) MonitoringScreen 구독용 — 현재 phase
+  ValueNotifier<CallPhase> get phase => _fsm.phase;
+
+  /// (`Getter`) MonitoringScreen 구독용 — 종결 사유 (terminated 이후에만 유효)
+  TerminateReason? get terminateReason => _fsm.reason;
 
   /// 현재 모니터링(RecvOnly) 모드인지 여부
   bool _isMonitoring = false;
@@ -124,6 +138,10 @@ class WebRtcService {
 
   /// 재연결 진행 여부 ValueNotifier — MonitoringScreen이 ValueListenableBuilder로 구독.
   final ValueNotifier<bool> isReconnecting = ValueNotifier(false);
+
+  /// SDP answer 수신 + setRemoteDescription 완료 여부 (Senior 도달 신호)
+  /// MonitoringScreen이 Phase 1 (도달 확인) 종료 신호로 사용.
+  final ValueNotifier<bool> answerReceived = ValueNotifier(false);
 
   // ─── 상수 ───
 
@@ -254,7 +272,7 @@ class WebRtcService {
   /// - **Side Effects**: PeerConnection 생성, 로컬/원격 스트림 연결, AEC 모니터링 시작
   /// - **호출**: Senior 앱 수신 로직
   Future<void> answerCall(String callId, Map<String, dynamic> offer) async {
-    _isHungUp = false;
+    _fsm.to(CallPhase.connecting, reason: 'answerCall');
     _callId = callId;
     print('WebRTC: 통화 응답 시작 callId=$callId');
 
@@ -293,10 +311,10 @@ class WebRtcService {
       ));
     });
 
-    // 7. 발신자 통화 종료 감시
-    _signaling.listenForCallEnd(callId, () {
-      print('WebRTC: 발신자가 통화 종료');
-      hangUp();
+    // 7. 발신자 통화 종료 감시 — answerCall 은 Senior 측 코드지만 유지
+    _signaling.listenForCallEnd(callId, (endReason) {
+      print('WebRTC: 발신자가 통화 종료 endReason=$endReason');
+      hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
     });
 
@@ -403,6 +421,10 @@ class WebRtcService {
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = null;
       isReconnecting.value = false;
+      // reconnecting → connected 복귀 (ICE restart 후)
+      if (_fsm.phase.value == CallPhase.reconnecting) {
+        _fsm.to(CallPhase.connected, reason: 'ice_restored');
+      }
       _stableTimer?.cancel();
       _stableTimer = Timer(const Duration(milliseconds: _stableResetMs), () {
         if (_peerConnection?.connectionState ==
@@ -424,23 +446,29 @@ class WebRtcService {
   ///   한도 초과 시 [hangUp] + `onCallEnded` 호출.
   /// - **호출**: [_onPeerConnectionStateChanged] (DISCONNECTED grace 만료 / FAILED 즉시)
   Future<void> _triggerIceRestart() async {
-    if (_isHungUp) return;
+    if (_isEnding) return;
     if (_iceRestartInProgress) return;
     if (_peerConnection == null || _callId == null) return;
 
     final now = DateTime.now().millisecondsSinceEpoch;
     _flapWindowStart ??= now;
     if (now - _flapWindowStart! > _maxFlapWindowMs) {
-      print('WebRTC: flap window($_maxFlapWindowMs ms) 초과 → hangUp');
-      await hangUp();
+      print('WebRTC: flap window($_maxFlapWindowMs ms) 초과 → iceFailed 종결');
+      await hangUp(reason: TerminateReason.iceFailed);
       onCallEnded?.call();
       return;
     }
     if (_iceRestartAttempts >= _maxIceRestartAttempts) {
-      print('WebRTC: ICE restart 한도($_maxIceRestartAttempts) 초과 → hangUp');
-      await hangUp();
+      print('WebRTC: ICE restart 한도($_maxIceRestartAttempts) 초과 → iceFailed 종결');
+      await hangUp(reason: TerminateReason.iceFailed);
       onCallEnded?.call();
       return;
+    }
+
+    // 첫 진입 시 connected → reconnecting 전이 (MonitoringScreen 배너용)
+    if (_fsm.phase.value == CallPhase.connected ||
+        _fsm.phase.value == CallPhase.upgrading) {
+      _fsm.to(CallPhase.reconnecting, reason: 'ice_restart_start');
     }
 
     _iceRestartAttempts++;
@@ -501,7 +529,7 @@ class WebRtcService {
   /// - **Side Effects**: PeerConnection 생성, 로컬/원격 스트림 연결, AEC 모니터링 시작
   /// - **호출**: (현재 미사용 — startCall로 대체됨)
   Future<String> makeCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
-    _isHungUp = false;
+    if (!_fsm.to(CallPhase.connecting, reason: 'makeCall')) return '';
     _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 발신 시작 → target=$targetDeviceId');
 
@@ -511,12 +539,15 @@ class WebRtcService {
 
     // 2. PeerConnection 생성 — onIceCandidate를 먼저 등록 (callId 확정 전 candidate는 _pendingCandidates에 큐잉)
     final pc = await createPeerConnection(_iceServers);
+    if (_isEnding) { await pc.close(); return ''; }
     _peerConnection = pc;
 
     for (final track in _localStream!.getTracks()) {
       await pc.addTrack(track, _localStream!);
     }
+    if (_isEnding) return '';
     await _setVideoBitrate(pc, 4000);
+    if (_isEnding) return '';
 
     pc.onTrack = _onTrack;
     pc.onIceCandidate = _onIceCandidate;
@@ -524,7 +555,9 @@ class WebRtcService {
 
     // 4. SDP offer 생성
     final offer = await pc.createOffer();
+    if (_isEnding) return '';
     await pc.setLocalDescription(offer);
+    if (_isEnding) return '';
 
     // 5. 시그널링 서버에 통화 생성 (targetDeviceId + caller 정보 포함)
     final callId = await _signaling.createCall(
@@ -535,10 +568,22 @@ class WebRtcService {
       callerDeviceId: AppConfig.deviceId,
       targetFamilyId: familyId,
     );
+    // hangUp이 createCall 진행 중에 호출된 경우 — orphan call 생성된 상태. 즉시 정리.
+    if (_isEnding) {
+      print('WebRTC: makeCall 중 hangUp 감지 → orphan call 정리 callId=$callId');
+      await _signaling.endCall(callId);
+      await _signaling.cleanupCall(callId);
+      return '';
+    }
     _callId = callId;
 
     // onDisconnect 설정
     await _signaling.setCallCleanupOnDisconnect(callId);
+    if (_isEnding) {
+      await _signaling.endCall(callId);
+      await _signaling.cleanupCall(callId);
+      return '';
+    }
 
     // 큐에 쌓인 ICE candidate 전송
     _flushPendingCandidates();
@@ -549,6 +594,27 @@ class WebRtcService {
     print('WebRTC: 발신 완료, answer 대기 중 callId=$callId');
     _startAecStats();
     return callId;
+  }
+
+  // ─── endReason → TerminateReason 매핑 ───
+
+  /// (`Utility`) Senior 가 `/calls/{cid}/endReason` 에 쓴 문자열을 [TerminateReason] 으로 매핑.
+  ///
+  /// - `"remoteBusy"` → Senior 가 다른 가족과 통화 중
+  /// - `"capacityExceeded"` → 모니터링 MAX_PEERS 초과
+  /// - `"otherCallStarted"` → 다른 가족이 통화 시작하여 내 모니터가 displaced
+  /// - `"normal"` / `null` / 기타 → 정상 종료 (remoteEnded)
+  TerminateReason _mapEndReason(String? endReason) {
+    switch (endReason) {
+      case 'remoteBusy':
+        return TerminateReason.remoteBusy;
+      case 'capacityExceeded':
+        return TerminateReason.capacityExceeded;
+      case 'otherCallStarted':
+        return TerminateReason.endedByOtherCall;
+      default:
+        return TerminateReason.remoteEnded;
+    }
   }
 
   // ─── 시그널링 리스너 통합 등록 (3개 발신 메서드 공통) ───
@@ -571,6 +637,11 @@ class WebRtcService {
         await _peerConnection?.setRemoteDescription(
           RTCSessionDescription(answer['sdp'], answer['type']),
         );
+        // Phase 1 (Senior 도달 확인) 종료 신호 — MonitoringScreen이 구독
+        answerReceived.value = true;
+        if (_fsm.phase.value == CallPhase.connecting) {
+          _fsm.to(CallPhase.connected, reason: 'answer_received');
+        }
       }
     });
 
@@ -583,8 +654,8 @@ class WebRtcService {
       ));
     });
 
-    _callEndSub = _signaling.listenForCallEnd(callId, () {
-      hangUp();
+    _callEndSub = _signaling.listenForCallEnd(callId, (endReason) {
+      hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
     });
 
@@ -626,13 +697,14 @@ class WebRtcService {
   /// - **Side Effects**: PeerConnection 생성 (RecvOnly), _isMonitoring=true
   /// - **호출**: MonitoringScreen._startMonitoring
   Future<String> startMonitoring(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
-    _isHungUp = false;
+    if (!_fsm.to(CallPhase.connecting, reason: 'startMonitoring')) return '';
     _isMonitoring = true;
     _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 모니터링 시작 → target=$targetDeviceId');
 
     // PeerConnection 생성 — 로컬 미디어 없음
     final pc = await createPeerConnection(_iceServers);
+    if (_isEnding) { await pc.close(); return ''; }
     _peerConnection = pc;
 
     // recvonly transceiver 추가 (영상+음성 수신만)
@@ -640,10 +712,12 @@ class WebRtcService {
       kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
+    if (_isEnding) return '';
     await pc.addTransceiver(
       kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
+    if (_isEnding) return '';
 
     pc.onTrack = _onTrack;
     pc.onIceCandidate = _onIceCandidate;
@@ -651,7 +725,9 @@ class WebRtcService {
 
     // SDP offer 생성
     final offer = await pc.createOffer();
+    if (_isEnding) return '';
     await pc.setLocalDescription(offer);
+    if (_isEnding) return '';
 
     // 시그널링: callType="monitor"
     final callId = await _signaling.createCall(
@@ -663,9 +739,17 @@ class WebRtcService {
       targetFamilyId: familyId,
       callType: 'monitor',
     );
+    // hangUp이 중간에 호출된 경우 orphan 정리
+    if (_isEnding) {
+      print('WebRTC: startMonitoring 중 hangUp 감지 → orphan call 정리 callId=$callId');
+      await _signaling.endCall(callId);
+      await _signaling.cleanupCall(callId);
+      return '';
+    }
     _callId = callId;
 
     await _signaling.setCallCleanupOnDisconnect(callId);
+    if (_isEnding) { await _signaling.endCall(callId); await _signaling.cleanupCall(callId); return ''; }
 
     _flushPendingCandidates();
     _registerSignalingListeners(callId);
@@ -691,29 +775,34 @@ class WebRtcService {
   /// - **Side Effects**: PeerConnection 생성 (RecvOnly), 로컬 프리뷰 시작, Senior 수락 감시
   /// - **호출**: MonitoringScreen._startCall
   Future<String> startCall(String targetDeviceId, {String? callerUid, String? callerName, String? familyId}) async {
-    _isHungUp = false;
+    if (!_fsm.to(CallPhase.connecting, reason: 'startCall')) return '';
     _isMonitoring = true; // RecvOnly로 시작
     _myIceCandidatePath = 'callerCandidates';
     print('WebRTC: 통화 발신 시작 → target=$targetDeviceId');
 
     final pc = await createPeerConnection(_iceServers);
+    if (_isEnding) { await pc.close(); return ''; }
     _peerConnection = pc;
 
     await pc.addTransceiver(
       kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
+    if (_isEnding) return '';
     await pc.addTransceiver(
       kind: RTCRtpMediaType.RTCRtpMediaTypeAudio,
       init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
     );
+    if (_isEnding) return '';
 
     pc.onTrack = _onTrack;
     pc.onIceCandidate = _onIceCandidate;
     pc.onConnectionState = _onPeerConnectionStateChanged;
 
     final offer = await pc.createOffer();
+    if (_isEnding) return '';
     await pc.setLocalDescription(offer);
+    if (_isEnding) return '';
 
     final callId = await _signaling.createCall(
       {'sdp': offer.sdp, 'type': offer.type},
@@ -724,15 +813,25 @@ class WebRtcService {
       targetFamilyId: familyId,
       callType: 'call',
     );
+    // hangUp이 createCall 진행 중에 호출된 경우 — orphan call 생성된 상태.
+    // Senior가 받기 전에 즉시 정리.
+    if (_isEnding) {
+      print('WebRTC: startCall 중 hangUp 감지 → orphan call 정리 callId=$callId');
+      await _signaling.endCall(callId);
+      await _signaling.cleanupCall(callId);
+      return '';
+    }
     _callId = callId;
 
     await _signaling.setCallCleanupOnDisconnect(callId);
+    if (_isEnding) { await _signaling.endCall(callId); await _signaling.cleanupCall(callId); return ''; }
 
     _flushPendingCandidates();
     _registerSignalingListeners(callId);
 
     // 로컬 카메라 프리뷰 시작 (상대방에게 미전송)
     await _startLocalPreviewOnly();
+    if (_isEnding) return callId;
 
     // Senior 수락 대기
     _listenForSeniorAccepted(callId);
@@ -790,55 +889,82 @@ class WebRtcService {
   /// - **Side Effects**: transceiver 방향 변경, 로컬 트랙 추가, _isMonitoring=false (전환 완료 시)
   /// - **호출**: [_listenForSeniorAccepted] (자동), MonitoringScreen._upgradeToCall (수동)
   Future<void> upgradeToCall() async {
+    // 진입 조건: connected 또는 connecting 허용 (connecting 에선 답신 전 race 허용 — 기존 동작 유지)
+    final currentPhase = _fsm.phase.value;
+    if (currentPhase != CallPhase.connected &&
+        currentPhase != CallPhase.connecting) return;
     if (_peerConnection == null || _callId == null) return;
+    if (!_fsm.to(CallPhase.upgrading, reason: 'senior_accepted')) return;
     print('WebRTC: 모니터링 → 통화 전환');
 
     // 로컬 미디어 획득 (startCall에서 이미 프리뷰 시작했으면 재사용)
     if (_localStream == null) {
       _localStream = await _getLocalStream();
+      if (_isEnding) return;
       localRenderer.srcObject = _localStream;
     }
 
     // 기존 transceiver를 sendrecv로 변경 + 로컬 트랙 추가
-    final transceivers = await _peerConnection!.getTransceivers();
+    final pc = _peerConnection;
+    if (pc == null || _isEnding) return;
+    final transceivers = await pc.getTransceivers();
+    if (_isEnding) return;
     for (final t in transceivers) {
       final kind = t.sender.track?.kind ?? t.receiver.track?.kind;
       if (kind == 'video') {
-        final videoTrack = _localStream!.getVideoTracks().firstOrNull;
+        final videoTrack = _localStream?.getVideoTracks().firstOrNull;
         if (videoTrack != null) {
           await t.sender.replaceTrack(videoTrack);
+          if (_isEnding) return;
           await t.setDirection(TransceiverDirection.SendRecv);
+          if (_isEnding) return;
         }
       } else if (kind == 'audio') {
-        final audioTrack = _localStream!.getAudioTracks().firstOrNull;
+        final audioTrack = _localStream?.getAudioTracks().firstOrNull;
         if (audioTrack != null) {
           await t.sender.replaceTrack(audioTrack);
+          if (_isEnding) return;
           await t.setDirection(TransceiverDirection.SendRecv);
+          if (_isEnding) return;
         }
       }
     }
 
     // 비트레이트 설정
-    await _setVideoBitrate(_peerConnection!, 4000);
+    await _setVideoBitrate(pc, 4000);
+    if (_isEnding) return;
 
     // renegotiation offer 생성
-    final offer = await _peerConnection!.createOffer();
-    await _peerConnection!.setLocalDescription(offer);
+    final offer = await pc.createOffer();
+    if (_isEnding) return;
+    await pc.setLocalDescription(offer);
+    if (_isEnding) return;
+
+    // _callId를 로컬 변수로 고정 — hangUp이 null 세팅해도 영향 없음
+    final cid = _callId;
+    if (cid == null || _isEnding) return;
 
     // 전환 요청 + renegotiate offer 전송
-    await _signaling.requestUpgrade(_callId!);
-    await _signaling.sendRenegotiateOffer(_callId!, {
+    await _signaling.requestUpgrade(cid);
+    if (_isEnding) return;
+    await _signaling.sendRenegotiateOffer(cid, {
       'sdp': offer.sdp,
       'type': offer.type,
     });
+    if (_isEnding) return;
 
     // renegotiate answer 감시
-    _signaling.listenForRenegotiateAnswer(_callId!, (answer) async {
+    _signaling.listenForRenegotiateAnswer(cid, (answer) async {
+      if (_isEnding) return;
       await _peerConnection?.setRemoteDescription(
         RTCSessionDescription(answer['sdp'], answer['type']),
       );
+      if (_isEnding) return;
       print('WebRTC: 통화 전환 완료 (양방향)');
       _isMonitoring = false;
+      if (_fsm.phase.value == CallPhase.upgrading) {
+        _fsm.to(CallPhase.connected, reason: 'renegotiate_done');
+      }
     });
   }
 
@@ -854,13 +980,17 @@ class WebRtcService {
 
   /// (`Method`, async) 통화 종료 — 미디어/PeerConnection 정리 + RTDB status="ended"
   ///
-  /// 중복 호출 방지(_isHungUp), 로컬 트랙 정지, PeerConnection 종료,
-  /// 시그널링 endCall 후 2초 대기하여 상대방 감지 시간 확보 후 RTDB 노드 삭제.
-  /// - **Side Effects**: 모든 미디어/연결 리소스 해제, RTDB 상태 업데이트
-  /// - **호출**: MonitoringScreen._hangUp, 연결 끊김/실패 자동 감지
-  Future<void> hangUp() async {
-    if (_isHungUp) return;
-    _isHungUp = true;
+  /// 모든 종결 경로의 단일 진입점. 중복 호출 방지, 로컬 트랙 정지,
+  /// PeerConnection 종료, 시그널링 endCall 후 2초 대기하여 상대방 감지 시간 확보 후 RTDB 노드 삭제.
+  /// - **Params**:
+  ///   - [reason] — 종결 사유 (기본값 userHangup). MonitoringScreen UX 매핑에 사용.
+  /// - **Side Effects**: FSM terminating→terminated 전이, 모든 미디어/연결 리소스 해제, RTDB 상태 업데이트
+  /// - **호출**: MonitoringScreen._hangUp(userHangup), 연결 끊김/실패 자동(iceFailed/remoteEnded/...)
+  Future<void> hangUp({TerminateReason reason = TerminateReason.userHangup}) async {
+    if (_fsm.isEnding) return; // 중복 호출 차단
+    _fsm.reason = reason; // MonitoringScreen 이 읽기 전에 세팅
+    // ★ terminating 먼저 전이 — 다른 async 경로 즉시 차단
+    if (!_fsm.to(CallPhase.terminating, reason: 'hangup:${reason.name}')) return;
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
     _stableTimer?.cancel();
@@ -883,6 +1013,7 @@ class WebRtcService {
 
     // ICE restart 상태 리셋
     isReconnecting.value = false;
+    answerReceived.value = false;
     _iceRestartInProgress = false;
     _iceRestartAttempts = 0;
     _flapWindowStart = null;
@@ -916,6 +1047,9 @@ class WebRtcService {
       remoteRenderer.srcObject = null;
       localRenderer.srcObject = null;
     } catch (_) {}
+
+    // ★ 모든 cleanup 완료 → terminated 전이 (MonitoringScreen 이 이 시점에 반응)
+    _fsm.to(CallPhase.terminated, reason: 'cleanup_done');
   }
 
   // ─── 리소스 해제 ───
@@ -929,5 +1063,7 @@ class WebRtcService {
     await localRenderer.dispose();
     await remoteRenderer.dispose();
     isReconnecting.dispose();
+    answerReceived.dispose();
+    _fsm.dispose();
   }
 }

@@ -1,7 +1,10 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../../services/reminder/reminder_service.dart';
 import '../../widgets/safe_state_mixin.dart';
+import '../../widgets/tap_guard.dart';
+import '../../widgets/press_scale.dart';
 import 'reminder_edit_screen.dart';
 
 /// 영상 알림 목록 화면 (`StatefulWidget`)
@@ -42,6 +45,12 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
   /// 초기 로딩 중 여부
   bool _loading = true;
 
+  // ─── TapGuard ───
+  final _addGuard = TapGuard();
+  final _editGuard = TapGuard();
+  final _deleteGuard = TapGuard();
+  final _toggleGuard = TapGuard();
+
   // ─── 라이프사이클 ───
 
   /// 초기화 — 알림 스트림 구독 시작 (`Lifecycle`)
@@ -62,6 +71,10 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
   /// 스트림 구독 해제 (`Lifecycle`)
   @override
   void dispose() {
+    _addGuard.dispose();
+    _editGuard.dispose();
+    _deleteGuard.dispose();
+    _toggleGuard.dispose();
     _sub?.cancel();
     super.dispose();
   }
@@ -158,9 +171,23 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
       appBar: AppBar(
         title: const Text('영상 알림'),
         actions: [
-          IconButton(
-            icon: const Icon(Icons.add),
-            onPressed: _addReminder,
+          ValueListenableBuilder<bool>(
+            valueListenable: _addGuard.isBusy,
+            builder: (context, busy, _) {
+              final tap = busy
+                  ? null
+                  : () {
+                      HapticFeedback.lightImpact();
+                      _addGuard.run(_addReminder);
+                    };
+              return PressScale(
+                onTap: tap,
+                child: IconButton(
+                  icon: const Icon(Icons.add),
+                  onPressed: tap,
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -178,10 +205,24 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
                           style: TextStyle(
                               fontSize: 16, color: Colors.grey.shade600)),
                       const SizedBox(height: 24),
-                      ElevatedButton.icon(
-                        onPressed: _addReminder,
-                        icon: const Icon(Icons.add),
-                        label: const Text('알림 추가'),
+                      ValueListenableBuilder<bool>(
+                        valueListenable: _addGuard.isBusy,
+                        builder: (context, busy, _) {
+                          final tap = busy
+                              ? null
+                              : () {
+                                  HapticFeedback.lightImpact();
+                                  _addGuard.run(_addReminder);
+                                };
+                          return PressScale(
+                            onTap: tap,
+                            child: ElevatedButton.icon(
+                              onPressed: tap,
+                              icon: const Icon(Icons.add),
+                              label: const Text('알림 추가'),
+                            ),
+                          );
+                        },
                       ),
                     ],
                   ),
@@ -204,7 +245,12 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
   ///   - 길게 누르기: _deleteReminder (삭제 확인)
   ///   - Switch: toggleReminder (ON/OFF 토글)
   Widget _buildReminderTile(Reminder reminder) {
-    return ListTile(
+    return PressScale(
+      onTap: () {
+        HapticFeedback.lightImpact();
+        _editGuard.run(() => _editReminder(reminder));
+      },
+      child: ListTile(
       leading: Icon(
         reminder.mediaType == 'video' ? Icons.videocam : Icons.mic,
         color: reminder.enabled ? Colors.deepPurple : Colors.grey,
@@ -223,13 +269,25 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
           color: reminder.enabled ? null : Colors.grey,
         ),
       ),
-      trailing: Switch(
-        value: reminder.enabled,
-        onChanged: (v) =>
-            _service.toggleReminder(widget.familyId, reminder.id, v),
+      trailing: ValueListenableBuilder<bool>(
+        valueListenable: _toggleGuard.isBusy,
+        builder: (context, busy, _) => Switch(
+          value: reminder.enabled,
+          onChanged: busy
+              ? null
+              : (v) {
+                  HapticFeedback.selectionClick();
+                  _toggleGuard.run(
+                      () => _service.toggleReminder(widget.familyId, reminder.id, v));
+                },
+        ),
       ),
-      onTap: () => _editReminder(reminder),
-      onLongPress: () => _deleteReminder(reminder),
+      onTap: null, // PressScale에서 처리
+      onLongPress: () {
+        HapticFeedback.mediumImpact();
+        _deleteGuard.run(() => _deleteReminder(reminder));
+      },
+      ),
     );
   }
 }

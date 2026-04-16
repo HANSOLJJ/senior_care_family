@@ -2,11 +2,15 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter/services.dart';
 import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
 import '../services/photo_transfer_service.dart';
+import '../services/presence_util.dart';
 import '../widgets/safe_state_mixin.dart';
+import '../widgets/tap_guard.dart';
+import '../widgets/press_scale.dart';
 // outgoing_call_screen은 MonitoringScreen(callType:"call")으로 통합됨
 import 'photo_upload_screen.dart';
 import 'monitoring_screen.dart';
@@ -65,7 +69,8 @@ class FamilyDetailScreen extends StatefulWidget {
 /// - **액션**: _callDevice, _monitorDevice, _openPhotos, _openVideoReminder
 /// - **관리**: _confirmUnpair, _addFamily
 /// - **UI**: build, _buildDeviceStatusCard, _buildActionButtons 등
-class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateMixin {
+class _FamilyDetailScreenState extends State<FamilyDetailScreen>
+    with SafeStateMixin, WidgetsBindingObserver {
   /// 가족 관련 CRUD 서비스
   final _familyService = FamilyService();
 
@@ -93,6 +98,13 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   /// 데이터 초기 로딩 중 여부
   bool _loading = true;
 
+  // ─── TapGuard (double-tap 차단 + busy 상태) ───
+  final _callGuard = TapGuard();
+  final _monitorGuard = TapGuard();
+  final _photoGuard = TapGuard();
+  final _reminderGuard = TapGuard();
+  final _menuGuard = TapGuard();
+
   // ─── Getter ───
 
   /// 대표 기기 (첫 번째 Senior 기기) (`Getter`)
@@ -104,9 +116,9 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
 
   /// 대표 기기 온라인 여부 (`Getter`)
   ///
-  /// - **Returns**: `bool` — online 필드가 true인지
+  /// - **Returns**: `bool` — connections 자식이 1개라도 있는지 (PresenceUtil 기반)
   /// - **호출**: _buildDeviceStatusCard, _buildActionButtons
-  bool get _isOnline => _primaryDevice?['online'] == true;
+  bool get _isOnline => PresenceUtil.isOnlineFromMap(_primaryDevice);
 
   /// 현재 통화 중 여부 (`Getter`)
   ///
@@ -123,7 +135,20 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadData();
+  }
+
+  /// (`Lifecycle`) 앱 resume 시 기기 목록/online 상태 강제 재조회
+  ///
+  /// 백그라운드에서 Firebase WebSocket이 끊겼다 복귀할 때 onValue가 stale
+  /// 값을 반환하는 케이스 대응. Senior 측 60s heartbeat와 함께 곧 fresh
+  /// 값으로 수렴.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _refreshDeviceList();
+    }
   }
 
   /// 데이터 감시 일괄 시작 (`Method`)
@@ -207,8 +232,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
 
     // 온라인 기기 우선
     list.sort((a, b) {
-      final aOn = a['online'] == true ? 0 : 1;
-      final bOn = b['online'] == true ? 0 : 1;
+      final aOn = PresenceUtil.isOnlineFromMap(a) ? 0 : 1;
+      final bOn = PresenceUtil.isOnlineFromMap(b) ? 0 : 1;
       return aOn.compareTo(bOn);
     });
 
@@ -280,14 +305,15 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   ///
   /// - **Side Effects**: Navigator push → MonitoringScreen
   /// - **호출**: _buildActionButtons() 영상통화 버튼 onTap
-  void _callDevice() {
+  Future<void> _callDevice() async {
     final device = _primaryDevice;
     if (device == null) return;
-    Navigator.of(context).push(
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
           targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          familyLabel: widget.familyName,
           callType: 'call',
           familyId: widget.familyId,
         ),
@@ -301,14 +327,15 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   ///
   /// - **Side Effects**: Navigator push → MonitoringScreen
   /// - **호출**: _buildActionButtons() 모니터링 버튼 onTap
-  void _monitorDevice() {
+  Future<void> _monitorDevice() async {
     final device = _primaryDevice;
     if (device == null) return;
-    Navigator.of(context).push(
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
           targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          familyLabel: widget.familyName,
           callType: 'monitor',
           familyId: widget.familyId,
         ),
@@ -320,8 +347,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   ///
   /// - **Side Effects**: Navigator push → PhotoUploadScreen
   /// - **호출**: _buildActionButtons() 사진 보내기 버튼 onTap, _buildRecentPhotos() 더보기
-  void _openPhotos() {
-    Navigator.of(context).push(
+  Future<void> _openPhotos() async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PhotoUploadScreen(familyId: widget.familyId),
       ),
@@ -332,8 +359,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   ///
   /// - **Side Effects**: Navigator push → ReminderListScreen
   /// - **호출**: _buildActionButtons() 영상 알림 버튼 onTap
-  void _openVideoReminder() {
-    Navigator.of(context).push(
+  Future<void> _openVideoReminder() async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => ReminderListScreen(familyId: widget.familyId),
       ),
@@ -380,8 +407,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   ///
   /// - **Side Effects**: Navigator push, onAddFamily 콜백
   /// - **호출**: PopupMenuButton 'add' 선택 시
-  void _addFamily() {
-    Navigator.of(context).push(
+  Future<void> _addFamily() async {
+    await Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => PairingScreen(
           onPairedWithId: (familyId) async {
@@ -401,6 +428,12 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
   /// - **호출**: 위젯 제거 시 Flutter 프레임워크에 의해
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _callGuard.dispose();
+    _monitorGuard.dispose();
+    _photoGuard.dispose();
+    _reminderGuard.dispose();
+    _menuGuard.dispose();
     for (final sub in _subs) {
       sub.cancel();
     }
@@ -434,9 +467,10 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
             icon: const Icon(Icons.more_vert, color: Colors.white70),
             color: Colors.grey[900],
             onSelected: (value) {
-              if (value == 'add') _addFamily();
-              if (value == 'unpair') _confirmUnpair();
-              if (value == 'logout') AuthService().signOut();
+              HapticFeedback.selectionClick();
+              if (value == 'add') _menuGuard.run(_addFamily);
+              if (value == 'unpair') _menuGuard.run(() async => _confirmUnpair());
+              if (value == 'logout') _menuGuard.run(() async => AuthService().signOut());
             },
             itemBuilder: (_) => [
               const PopupMenuItem(
@@ -624,24 +658,28 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
           icon: Icons.videocam,
           label: callLabel,
           color: canCall ? Colors.green : Colors.grey[700]!,
+          guard: _callGuard,
           onTap: canCall ? _callDevice : null,
         ),
         _actionButton(
           icon: Icons.camera_outdoor,
           label: '모니터링',
           color: canMonitor ? Colors.orange : Colors.grey[700]!,
+          guard: _monitorGuard,
           onTap: canMonitor ? _monitorDevice : null,
         ),
         _actionButton(
           icon: Icons.photo_library,
           label: '사진 보내기',
           color: Colors.blue,
+          guard: _photoGuard,
           onTap: _openPhotos,
         ),
         _actionButton(
           icon: Icons.movie,
           label: '영상 알림',
           color: Colors.purple,
+          guard: _reminderGuard,
           onTap: _openVideoReminder,
         ),
       ],
@@ -663,35 +701,49 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen> with SafeStateM
     required IconData icon,
     required String label,
     required Color color,
-    VoidCallback? onTap,
+    required TapGuard guard,
+    Future<void> Function()? onTap,
   }) {
-    final isDisabled = onTap == null;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        width: 100,
-        padding: const EdgeInsets.symmetric(vertical: 16),
-        decoration: BoxDecoration(
-          color: isDisabled ? Colors.grey[900] : color.withValues(alpha: 0.15),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isDisabled ? Colors.grey[800]! : color.withValues(alpha: 0.4),
-          ),
-        ),
-        child: Column(
-          children: [
-            Icon(icon, color: isDisabled ? Colors.grey[600] : color, size: 28),
-            const SizedBox(height: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: isDisabled ? Colors.grey[600] : Colors.white,
-                fontSize: 12,
+    return ValueListenableBuilder<bool>(
+      valueListenable: guard.isBusy,
+      builder: (context, busy, _) {
+        final isDisabled = onTap == null || busy;
+        return PressScale(
+          onTap: isDisabled
+              ? null
+              : () {
+                  HapticFeedback.lightImpact();
+                  guard.run(onTap);
+                },
+          child: Container(
+            width: 100,
+            padding: const EdgeInsets.symmetric(vertical: 16),
+            decoration: BoxDecoration(
+              color: isDisabled
+                  ? Colors.grey[900]
+                  : color.withValues(alpha: 0.15),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(
+                color: isDisabled ? Colors.grey[800]! : color.withValues(alpha: 0.4),
               ),
             ),
-          ],
-        ),
-      ),
+            child: Column(
+              children: [
+                Icon(icon,
+                    color: isDisabled ? Colors.grey[600] : color, size: 28),
+                const SizedBox(height: 6),
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: isDisabled ? Colors.grey[600] : Colors.white,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
     );
   }
 

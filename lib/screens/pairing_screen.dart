@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../services/family_service.dart';
 import '../services/auth_service.dart';
+import '../widgets/press_scale.dart';
 
 /// 페어링 코드 입력 화면 (`StatefulWidget`)
 ///
@@ -61,12 +62,14 @@ class _PairingScreenState extends State<PairingScreen> {
   /// - **Side Effects**: _loading, _error 갱신, onPairedWithId/onPaired 콜백 호출
   /// - **호출**: 연결 버튼 onPressed, TextField onSubmitted, QR 스캔 콜백
   Future<void> _submitCode([String? code]) async {
+    if (_loading) return; // double-tap 차단
     final pairingCode = code ?? _codeController.text.trim();
     if (pairingCode.isEmpty) {
       setState(() => _error = '페어링 코드를 입력하세요');
       return;
     }
 
+    HapticFeedback.lightImpact();
     setState(() { _loading = true; _error = null; });
 
     try {
@@ -90,6 +93,7 @@ class _PairingScreenState extends State<PairingScreen> {
   /// - **Side Effects**: Navigator push → _QrScanScreen, 스캔 성공 시 _submitCode 호출
   /// - **호출**: QR 스캔 버튼 onPressed
   void _openQrScanner() {
+    HapticFeedback.lightImpact();
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => _QrScanScreen(
@@ -218,54 +222,60 @@ class _PairingScreenState extends State<PairingScreen> {
                   ),
 
                 // 연결 버튼
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: ElevatedButton(
-                    onPressed: _loading ? null : () => _submitCode(),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.blue,
-                      disabledBackgroundColor: Colors.blue.withValues(alpha: 0.5),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                PressScale(
+                  onTap: _loading ? null : () => _submitCode(),
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: ElevatedButton(
+                      onPressed: _loading ? null : () => _submitCode(),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blue,
+                        disabledBackgroundColor: Colors.blue.withValues(alpha: 0.5),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
+                      child: _loading
+                          ? const SizedBox(
+                              width: 24,
+                              height: 24,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2,
+                              ),
+                            )
+                          : const Text(
+                              '연결하기',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 18,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
                     ),
-                    child: _loading
-                        ? const SizedBox(
-                            width: 24,
-                            height: 24,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 2,
-                            ),
-                          )
-                        : const Text(
-                            '연결하기',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 18,
-                              fontWeight: FontWeight.bold,
-                            ),
-                          ),
                   ),
                 ),
                 const SizedBox(height: 16),
 
                 // QR 스캔 버튼
-                SizedBox(
-                  width: double.infinity,
-                  height: 48,
-                  child: OutlinedButton.icon(
-                    onPressed: _loading ? null : _openQrScanner,
-                    icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
-                    label: const Text(
-                      'QR 코드 스캔',
-                      style: TextStyle(color: Colors.white, fontSize: 16),
-                    ),
-                    style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.white38),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                PressScale(
+                  onTap: _loading ? null : _openQrScanner,
+                  child: SizedBox(
+                    width: double.infinity,
+                    height: 48,
+                    child: OutlinedButton.icon(
+                      onPressed: _loading ? null : _openQrScanner,
+                      icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                      label: const Text(
+                        'QR 코드 스캔',
+                        style: TextStyle(color: Colors.white, fontSize: 16),
+                      ),
+                      style: OutlinedButton.styleFrom(
+                        side: const BorderSide(color: Colors.white38),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
                     ),
                   ),
