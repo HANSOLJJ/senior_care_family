@@ -312,7 +312,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
       MaterialPageRoute(
         builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
-          targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          targetDeviceName: (device['name'] ?? device['id']) as String,
           familyLabel: widget.familyName,
           callType: 'call',
           familyId: widget.familyId,
@@ -334,7 +334,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
       MaterialPageRoute(
         builder: (_) => MonitoringScreen(
           targetDeviceId: device['id'] as String,
-          targetDeviceName: (device['name'] ?? device['model'] ?? device['id']) as String,
+          targetDeviceName: (device['name'] ?? device['id']) as String,
           familyLabel: widget.familyName,
           callType: 'monitor',
           familyId: widget.familyId,
@@ -577,7 +577,7 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
                 ),
                 const SizedBox(width: 8),
                 Text(
-                  (device['name'] ?? device['model'] ?? '') as String,
+                  (device['name'] ?? '') as String,
                   style: const TextStyle(color: Colors.white38, fontSize: 13),
                 ),
               ],

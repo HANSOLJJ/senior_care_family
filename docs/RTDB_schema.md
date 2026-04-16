@@ -21,9 +21,9 @@
 
 ### `_label` 규칙
 
-- 모든 비-리프 노드에 `_label` 필드 추가
+- ~~모든 비-리프 노드에 `_label` 필드 추가~~ → **`/families/{fid}/_label` 만 유지**
+- 나머지 경로(devices, calls, members, photoSync, reminders)의 `_label` 은 DEPRECATED
 - `_`가 알파벳 순 최상위 → Firebase Console에서 노드 열면 첫 번째로 보임
-- 각 앱이 노드 생성/수정 시 함께 업데이트
 
 ---
 
@@ -31,10 +31,10 @@
 Firebase RTDB
 │
 ├── /devices/{deviceId}/                        # Senior 기기 전용 레지스트리
-│   ├── _label: string                          # "SM-T500 (senior)"
+│   ├── _label: string                          # ⚠️ DEPRECATED — 신규 미생성. 기존 데이터만 잔존.
 │   ├── role: "senior"                          # 항상 senior (Family는 등록 안 함)
-│   ├── model: string                           # "SM-T500"
-│   ├── name: string                            # 표시 이름 (기본값 = model)
+│   ├── model: string                           # ⚠️ DEPRECATED — name 으로 통일. 기존 데이터만 잔존.
+│   ├── name: string                            # 표시 이름 (기기 모델명)
 │   ├── lastSeen: timestamp                     # onDisconnect → ServerValue.TIMESTAMP
 │   ├── connections/                            # Connection List (race-free presence)
 │   │   └── {sessionId}: true                   # Senior가 register 시 UUID 생성.
@@ -56,14 +56,16 @@ Firebase RTDB
 │   Presence 판정 (Family): connections.hasChildren()
 │
 ├── /calls/{callId}/                            # 영상통화 시그널링 (임시, 통화 종료 후 삭제)
-│   ├── _label: string                          # "홍길동 → SM-T500 (call) ringing"
+│   ├── _label: string                          # ⚠️ DEPRECATED — 신규 미생성.
 │   ├── callerUid: string                       # 발신자 Firebase Auth UID
 │   ├── callerName: string                      # 발신자 표시 이름
-│   ├── callerDeviceId: string                  # 발신 기기 ID
+│   ├── callerDeviceId: string                  # ⚠️ DEPRECATED — callerUid 로 충분. 신규 미생성.
 │   ├── targetDeviceId: string                  # 수신 기기 ID (Senior)
 │   ├── targetFamilyId: string                  # 수신 가족 ID (Security Rules용)
 │   ├── callType: "call" | "monitor"            # call=양방향, monitor=일방향 CCTV
 │   ├── status: "ringing"|"connected"|"ended"   # 통화 상태
+│   ├── endReason: string | null                # "normal"/"remoteBusy"/"capacityExceeded"/"otherCallStarted"
+│   ├── seniorAccepted: boolean | null           # Senior 수락 여부 (call 타입)
 │   ├── createdAt: timestamp
 │   ├── offer: { sdp: string, type: string }    # SDP offer (Family → Senior)
 │   ├── answer: { sdp: string, type: string }   # SDP answer (Senior → Family)
@@ -73,10 +75,13 @@ Firebase RTDB
 │   │   └── {pushId}: { candidate, sdpMid, sdpMLineIndex }
 │   ├── upgradeRequest: "call" | null           # 모니터링 → 통화 전환 요청
 │   ├── renegotiateOffer: { sdp, type } | null
-│   └── renegotiateAnswer: { sdp, type } | null
+│   ├── renegotiateAnswer: { sdp, type } | null
+│   ├── iceRestartOffer: { sdp, type } | null   # ICE restart offer (Family → Senior)
+│   └── iceRestartAnswer: { sdp, type } | null  # ICE restart answer (Senior → Family)
 │
-│   Writer: Family (offer), Senior (answer)
-│   정리: 통화 종료 후 Senior가 2초 뒤 삭제
+│   Writer: Family (offer/candidates/upgradeRequest/renegotiateOffer/iceRestartOffer),
+│           Senior (answer/candidates/seniorAccepted/renegotiateAnswer/iceRestartAnswer/endReason)
+│   정리: 통화 종료 후 Family가 2초 뒤 삭제
 │
 ├── /pairingCodes/{code}: familyId              # 페어링 코드 → 가족 ID 역조회
 │
@@ -84,21 +89,17 @@ Firebase RTDB
 │   Reader: Family (페어링 참여 시)
 │
 ├── /users/{userId}/                            # Family 앱 사용자 프로필
-│   ├── _label: string                          # "홍길동 (kakao:487707844)"
-│   ├── name: string                            # 표시 이름
-│   ├── email: string                           # 이메일
-│   ├── photoUrl: string                        # 프로필 사진 URL
-│   ├── provider: "google"|"apple"|"kakao"|"naver"
-│   ├── createdAt: timestamp                    # 최초 가입 시각
-│   ├── lastLoginAt: timestamp                  # 최근 로그인 시각
+│   ├── provider: string                        # ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성.
+│   ├── updatedAt: timestamp                    # ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성.
 │   ├── familyIds/
 │   │   └── {familyId}: true                    # 소속 가족 목록
 │   └── familyNames/
 │       └── {familyId}: string                  # 가족별 별칭 ("부모님")
 │
-│   Writer: Family 앱 (자기 프로필만)
+│   Writer: Family 앱 (familyIds/familyNames만 active)
 │   Reader: Family 앱
 │   ※ Family 기기는 /devices/에 등록하지 않음
+│   ※ 프로필 정보(name/email/photoUrl)는 Firebase Auth 에서 직접 조회
 │
 └── /families/{familyId}/                       # 가족 그룹
     ├── _label: string                          # "부모님" (사용자 지정 이름)
@@ -109,12 +110,11 @@ Firebase RTDB
     │   ├── active: boolean
     │   ├── type: "call" | "monitor"
     │   ├── callerName: string
-    │   ├── callerUid: string
-    │   ├── callId: string
+    │   ├── count: number                       # Senior peers.size
     │   └── startedAt: timestamp
     │
-    │   Writer: Senior
-    │   Reader: Family
+    │   Writer: Senior (유일 writer — active=true 설정 + onDisconnect→null)
+    │   Reader: Family (family_detail_screen 통화중 표시)
     │
     ├── devices/
     │   └── {deviceId}: true                    # 소속 기기 목록 (상세 정보 없음!)
@@ -124,7 +124,7 @@ Firebase RTDB
     │
     ├── members/
     │   └── {userId}/
-    │       ├── _label: string                  # "홍길동 (kakao:487707844)"
+    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
     │       ├── name: string                    # 표시 이름 (사용자 지정)
     │       ├── role: "family"
     │       ├── provider: "google"|"apple"|"kakao"|"naver"
@@ -136,7 +136,7 @@ Firebase RTDB
     │
     ├── photoSync/
     │   └── {photoId}/
-    │       ├── _label: string                  # "photo_abc.jpg (pending, 홍길동)"
+    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
     │       ├── fileName: string
     │       ├── size: number
     │       ├── checksum: string
@@ -144,9 +144,10 @@ Firebase RTDB
     │       ├── storagePath: string | null      # 원본 임시 Storage 경로
     │       ├── thumbUrl: string                # 썸네일 Storage URL (영구)
     │       ├── thumbPath: string               # 썸네일 Storage 경로 (삭제용)
-    │       ├── uploadedBy: string
-    │       ├── uploadedByName: string
+    │       ├── uploadedBy: string              # 업로더 UID
+    │       ├── uploadedByName: string          # ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존.
     │       ├── createdAt: timestamp
+    │       ├── completedAt: timestamp | null   # 모든 Senior 다운로드 완료 시각
     │       ├── status: string                  # "pending"|"done"|"expired"
     │       ├── retryCount: number
     │       └── downloadedBy/                   # 각 Senior 다운로드 완료 기록
@@ -163,20 +164,21 @@ Firebase RTDB
     │
     ├── reminders/
     │   └── {reminderId}/
-    │       ├── _label: string                  # "혈압약 08:00 매일 [ON]"
+    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
     │       ├── title: string
     │       ├── mediaUrl: string
     │       ├── mediaType: "video" | "audio"
     │       ├── mediaDuration: number
+    │       ├── mediaDownloaded: boolean        # Senior 미디어 다운로드 완료 여부
     │       ├── schedule/
     │       │   ├── time: string                # "HH:mm"
     │       │   ├── repeat: "daily"|"weekdays"|"weekend"|"custom"|"test_5min"
     │       │   └── days: [number]              # custom일 때만
     │       ├── enabled: boolean
-    │       ├── createdBy: string
-    │       ├── createdByName: string
-    │       ├── targetDeviceId: string | null   # 대상 Senior (null=전체, 2차 구현)
-    │       ├── targetDeviceName: string | null
+    │       ├── createdBy: string               # 작성자 UID
+    │       ├── createdByName: string           # ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존.
+    │       ├── targetDeviceId: string | null   # ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성.
+    │       ├── targetDeviceName: string | null  # ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성.
     │       ├── createdAt: timestamp
     │       └── updatedAt: timestamp
     │

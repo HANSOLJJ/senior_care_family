@@ -34,9 +34,6 @@ class SignalingService {
   /// 현재 활성 통화 ID
   String? _currentCallId;
 
-  /// 현재 통화의 대상 가족 그룹 ID (callStatus 초기화에 사용)
-  String? _currentFamilyId;
-
   // ─── 수신 감시 ───
 
   /// (`Method`) 새로운 통화 요청 감시 (수신측) — targetDeviceId 필터링
@@ -180,36 +177,29 @@ class SignalingService {
   ///   - [targetDeviceId] — 수신 대상 Senior 기기 ID
   ///   - [callerUid] — 발신자 Firebase UID
   ///   - [callerName] — 발신자 표시 이름
-  ///   - [callerDeviceId] — 발신자 기기 ID
   ///   - [targetFamilyId] — 대상 가족 그룹 ID
   ///   - [callType] — `"call"` 또는 `"monitor"`
   /// - **Returns**: `String` — 생성된 callId
-  /// - **Side Effects**: RTDB에 통화 노드 생성, _currentCallId/_currentFamilyId 설정
+  /// - **Side Effects**: RTDB에 통화 노드 생성, _currentCallId 설정
   /// - **호출**: WebRtcService.makeCall, startMonitoring, startCall
   Future<String> createCall(
     Map<String, dynamic> offer, {
     required String targetDeviceId,
     String? callerUid,
     String? callerName,
-    String? callerDeviceId,
     String? targetFamilyId,
     String callType = 'call',
   }) async {
     final callRef = _db.child('calls').push();
     final callId = callRef.key!;
     final name = callerName ?? '가족';
-    final label = '$name → $targetDeviceId ($callType) ringing';
-    // 네트워크 오프라인 시 서버 ACK가 안 와서 Future가 멈추는 걸 방지.
-    // 타임아웃 시 큐에 쌓인 노드를 즉시 remove해서 복구 시 flush 방지.
     await writeOrTimeout(
       () => callRef.set({
-        '_label': label,
         'offer': offer,
         'targetDeviceId': targetDeviceId,
         'targetFamilyId': targetFamilyId,
         'callerUid': callerUid,
         'callerName': name,
-        'callerDeviceId': callerDeviceId,
         'callType': callType,
         'status': 'ringing',
         'createdAt': ServerValue.timestamp,
@@ -218,10 +208,8 @@ class SignalingService {
       onTimeoutCleanup: () => callRef.remove(),
     );
     _currentCallId = callId;
-    _currentFamilyId = targetFamilyId;
 
-    // `callStatus` 는 Senior 가 IN_CALL 진입 시 유일 writer (plan FSM v2 정책).
-    // Family 는 [endCall] 에서 active=false 로 내릴 권리만 보유 (UX 즉시 반영).
+    // `callStatus` 는 Senior 가 유일 writer (plan v2). Family 는 write 안 함.
 
     print('시그널링: ${callType == "monitor" ? "모니터링" : "통화"} 생성 callId=$callId → target=$targetDeviceId');
     return callId;
@@ -277,14 +265,17 @@ class SignalingService {
   Future<void> endCall(String callId) async {
     // onDisconnect 취소 (정상 종료이므로)
     await _db.child('calls/$callId').onDisconnect().cancel();
-    await _db.child('calls/$callId/status').set('ended');
-
-    // families/{fid}/callStatus 초기화
-    if (_currentFamilyId != null) {
-      await _db.child('families/$_currentFamilyId/callStatus').update({'active': false});
-      _currentFamilyId = null;
+    // 노드 존재 확인 후 status 업데이트 — 이미 cleanup 된 노드 부활 방지
+    final snap = (await _db.child('calls/$callId').once()).snapshot;
+    if (snap.exists) {
+      await writeOrTimeout(
+        () => _db.child('calls/$callId/status').set('ended'),
+        label: '통화 종료 신호',
+        timeout: const Duration(seconds: 2),
+      );
     }
-
+    // callStatus write 제거 — Senior 가 유일 writer (setValue(null))
+    // Family UI 즉시 반영은 MonitoringScreen pop 으로 이미 처리됨.
     print('시그널링: 통화 종료 callId=$callId');
   }
 
@@ -308,7 +299,17 @@ class SignalingService {
   /// - **Side Effects**: RTDB upgradeRequest 필드 설정
   /// - **호출**: WebRtcService.upgradeToCall
   Future<void> requestUpgrade(String callId) async {
-    await _db.child('calls/$callId/upgradeRequest').set('call');
+    // 노드 존재 + status 체크 — cleanup 된 노드에 set 하면 orphan 부활
+    final snap = (await _db.child('calls/$callId/status').once()).snapshot;
+    if (snap.value == null || snap.value == 'ended') {
+      print('시그널링: upgrade skip — node gone/ended callId=$callId');
+      return;
+    }
+    await writeOrTimeout(
+      () => _db.child('calls/$callId/upgradeRequest').set('call'),
+      label: '통화 전환 요청',
+      timeout: const Duration(seconds: 3),
+    );
     print('시그널링: 통화 전환 요청 callId=$callId');
   }
 
@@ -321,7 +322,16 @@ class SignalingService {
   /// - **Side Effects**: RTDB renegotiateOffer 필드 설정
   /// - **호출**: WebRtcService.upgradeToCall
   Future<void> sendRenegotiateOffer(String callId, Map<String, dynamic> offer) async {
-    await _db.child('calls/$callId/renegotiateOffer').set(offer);
+    final snap = (await _db.child('calls/$callId/status').once()).snapshot;
+    if (snap.value == null || snap.value == 'ended') {
+      print('시그널링: renegotiate skip — node gone/ended callId=$callId');
+      return;
+    }
+    await writeOrTimeout(
+      () => _db.child('calls/$callId/renegotiateOffer').set(offer),
+      label: 'renegotiate offer',
+      timeout: const Duration(seconds: 3),
+    );
     print('시그널링: renegotiate offer 전송 callId=$callId');
   }
 
@@ -355,7 +365,14 @@ class SignalingService {
   /// - **Side Effects**: RTDB `calls/{cid}/iceRestartOffer` 노드 set
   /// - **호출**: WebRtcService._triggerIceRestart
   Future<void> sendIceRestartOffer(String callId, Map<String, dynamic> offer) async {
-    await _db.child('calls/$callId/iceRestartOffer').set(offer);
+    // ICE restart 는 오프라인 상태에서 작동해야 하므로 status 체크 안 함.
+    // writeOrTimeout + onTimeoutCleanup 으로 orphan 방어.
+    await writeOrTimeout(
+      () => _db.child('calls/$callId/iceRestartOffer').set(offer),
+      label: 'ICE restart offer',
+      timeout: const Duration(seconds: 3),
+      onTimeoutCleanup: () => _db.child('calls/$callId/iceRestartOffer').remove(),
+    );
     print('시그널링: ICE restart offer 전송 callId=$callId');
   }
 

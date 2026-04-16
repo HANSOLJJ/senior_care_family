@@ -56,11 +56,9 @@ class FamilyService with FirebaseInstancesMixin {
     // 3. 멤버로 등록
     final name = user.displayName ?? '가족';
     final provider = _getProvider(user);
-    final label = '$name ($provider:${user.uid})';
     final memberRef = db.ref('families/$familyId/members/${user.uid}');
     await writeOrTimeout(
       () => memberRef.set({
-        '_label': label,
         'name': name,
         'role': 'family',
         'provider': provider,
@@ -75,14 +73,16 @@ class FamilyService with FirebaseInstancesMixin {
     await db.ref('users/${user.uid}/familyIds/$familyId').set(true);
 
     // 5. 가족 _label 업데이트 (멤버 이름 포함)
-    final familySnap2 = await db.ref('families/$familyId').get();
-    final familyData = familySnap2.value as Map?;
-    final deviceEntries = familyData?['devices'] as Map?;
-    final seniorModel = deviceEntries?.values.first is Map
-        ? (deviceEntries!.values.first as Map)['model'] ?? ''
-        : '';
-    final familyLabel = seniorModel.isNotEmpty
-        ? '$name의 가족 ($seniorModel)'
+    final devicesSnap = await db.ref('families/$familyId/devices').get();
+    final deviceIds = (devicesSnap.value as Map?)?.keys;
+    String seniorName = '';
+    if (deviceIds != null && deviceIds.isNotEmpty) {
+      final did = deviceIds.first;
+      final deviceSnap = await db.ref('devices/$did/name').get();
+      seniorName = (deviceSnap.value as String?) ?? '';
+    }
+    final familyLabel = seniorName.isNotEmpty
+        ? '$name의 가족 ($seniorName)'
         : '$name의 가족';
     await db.ref('families/$familyId/_label').set(familyLabel);
 

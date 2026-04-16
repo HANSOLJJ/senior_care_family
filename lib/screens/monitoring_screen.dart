@@ -64,7 +64,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   final SignalingService _signaling = SignalingService();
 
   /// WebRTC 피어 연결 + 미디어 스트림 관리 서비스
-  late final WebRtcService _webrtc;
+  late WebRtcService _webrtc;
 
   // ─── 상태 필드 ───
 
@@ -672,7 +672,12 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                               },
                         child: FloatingActionButton.extended(
                           heroTag: 'upgrade',
-                          onPressed: null, // PressScale에서 처리
+                          onPressed: busy
+                              ? null
+                              : () {
+                                  HapticFeedback.lightImpact();
+                                  _upgradeGuard.run(_upgradeToCall);
+                                },
                           backgroundColor: Colors.green,
                           icon: const Icon(Icons.videocam),
                           label: const Text('통화 전환'),
@@ -683,19 +688,16 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                 // 종료 버튼
                 ValueListenableBuilder<bool>(
                   valueListenable: _hangUpGuard.isBusy,
-                  builder: (context, busy, _) => PressScale(
-                    onTap: busy
+                  builder: (context, busy, _) => FloatingActionButton(
+                    heroTag: 'hangup',
+                    onPressed: busy
                         ? null
                         : () {
                             HapticFeedback.mediumImpact();
                             _hangUpGuard.run(_hangUp);
                           },
-                    child: FloatingActionButton(
-                      heroTag: 'hangup',
-                      onPressed: null, // PressScale에서 처리
-                      backgroundColor: Colors.red,
-                      child: const Icon(Icons.call_end, size: 32),
-                    ),
+                    backgroundColor: Colors.red,
+                    child: const Icon(Icons.call_end, size: 32),
                   ),
                 ),
               ],

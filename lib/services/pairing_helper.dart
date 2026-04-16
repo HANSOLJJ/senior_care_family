@@ -155,34 +155,14 @@ class PairingHelper {
     );
     if (name != null && name.isNotEmpty) {
       final uid = user.uid;
-      final provider = _getProvider(user);
-      final label = '$name ($provider:$uid)';
       await FirebaseDatabase.instance
           .ref('families/$familyId/members/$uid')
           .update({
         'name': name,
-        '_label': label,
       });
     }
   }
 
   // ─── 헬퍼 ───
 
-  /// Firebase Auth 사용자의 로그인 provider 문자열 추출 (`Utility`, static, private)
-  ///
-  /// 카카오/네이버는 uid 접두사로 판별, Google/Apple은 providerData로 판별.
-  /// _label 생성 시 `name (provider:uid)` 형식에 사용.
-  ///
-  /// - **Params**:
-  ///   - [user] — Firebase Auth User 객체
-  /// - **Returns**: `String` — 'kakao' | 'naver' | 'apple' | 'google' | 'unknown'
-  static String _getProvider(User user) {
-    if (user.uid.startsWith('kakao:')) return 'kakao';
-    if (user.uid.startsWith('naver:')) return 'naver';
-    for (final info in user.providerData) {
-      if (info.providerId == 'apple.com') return 'apple';
-      if (info.providerId == 'google.com') return 'google';
-    }
-    return 'unknown';
-  }
 }

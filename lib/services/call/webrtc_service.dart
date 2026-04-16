@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
-import '../../config/app_config.dart';
+import '../network_guard.dart';
 import 'call_state_machine.dart';
 import 'signaling_service.dart';
 
@@ -476,16 +476,17 @@ class WebRtcService {
 
     try {
       await _peerConnection!.restartIce();
+      if (_isEnding) return;
       final offer = await _peerConnection!.createOffer();
+      if (_isEnding) return;
       await _peerConnection!.setLocalDescription(offer);
-      // sendIceRestartOffer 자체에 writeOrTimeout 가드 추가 권장이지만,
-      // 일단 여기서 5초 타임아웃으로 감싸 RTDB 큐잉 시 hang 방지.
-      await _signaling
-          .sendIceRestartOffer(_callId!, {
-            'sdp': offer.sdp,
-            'type': offer.type,
-          })
-          .timeout(const Duration(seconds: 5));
+      if (_isEnding) return;
+      // signaling_service.sendIceRestartOffer 가 writeOrTimeout (3s) + onTimeoutCleanup 으로
+      // offline hang / orphan offer 를 모두 방어. 여기서는 별도 timeout 불필요.
+      await _signaling.sendIceRestartOffer(_callId!, {
+        'sdp': offer.sdp,
+        'type': offer.type,
+      });
       print('WebRTC: ICE restart offer 전송 (attempt=$_iceRestartAttempts)');
 
       // answer 수신 대기 타이머 — 만료 시 _iceRestartInProgress 리셋 + 자동 재시도.
@@ -565,7 +566,7 @@ class WebRtcService {
       targetDeviceId: targetDeviceId,
       callerUid: callerUid,
       callerName: callerName,
-      callerDeviceId: AppConfig.deviceId,
+
       targetFamilyId: familyId,
     );
     // hangUp이 createCall 진행 중에 호출된 경우 — orphan call 생성된 상태. 즉시 정리.
@@ -735,7 +736,7 @@ class WebRtcService {
       targetDeviceId: targetDeviceId,
       callerUid: callerUid,
       callerName: callerName,
-      callerDeviceId: AppConfig.deviceId,
+
       targetFamilyId: familyId,
       callType: 'monitor',
     );
@@ -809,7 +810,7 @@ class WebRtcService {
       targetDeviceId: targetDeviceId,
       callerUid: callerUid,
       callerName: callerName,
-      callerDeviceId: AppConfig.deviceId,
+
       targetFamilyId: familyId,
       callType: 'call',
     );
@@ -945,13 +946,23 @@ class WebRtcService {
     if (cid == null || _isEnding) return;
 
     // 전환 요청 + renegotiate offer 전송
-    await _signaling.requestUpgrade(cid);
-    if (_isEnding) return;
-    await _signaling.sendRenegotiateOffer(cid, {
-      'sdp': offer.sdp,
-      'type': offer.type,
-    });
-    if (_isEnding) return;
+    // NetworkException (오프라인 등) → upgradeFailed 로 종결, 모니터링은 유지.
+    try {
+      await _signaling.requestUpgrade(cid);
+      if (_isEnding) return;
+      await _signaling.sendRenegotiateOffer(cid, {
+        'sdp': offer.sdp,
+        'type': offer.type,
+      });
+      if (_isEnding) return;
+    } on NetworkException catch (e) {
+      print('WebRTC: upgrade 네트워크 실패 → connected 복귀 $e');
+      // 통화 죽이지 않음 — upgrading → connected 복귀 (모니터링 유지)
+      if (_fsm.phase.value == CallPhase.upgrading) {
+        _fsm.to(CallPhase.connected, reason: 'upgrade_network_fail');
+      }
+      return;
+    }
 
     // renegotiate answer 감시
     _signaling.listenForRenegotiateAnswer(cid, (answer) async {
@@ -1032,24 +1043,36 @@ class WebRtcService {
     await _peerConnection?.close();
     _peerConnection = null;
 
-    // 시그널링 종료: status='ended' 설정 후 2초 대기 → 상대방이 감지할 시간 확보
-    if (_callId != null) {
-      final cid = _callId!;
-      _callId = null;
-      await _signaling.endCall(cid);
-      Future.delayed(const Duration(seconds: 2), () {
-        _signaling.cleanupCall(cid);
-      });
-    }
-
     _remoteStream = null;
     try {
       remoteRenderer.srcObject = null;
       localRenderer.srcObject = null;
     } catch (_) {}
 
-    // ★ 모든 cleanup 완료 → terminated 전이 (MonitoringScreen 이 이 시점에 반응)
-    _fsm.to(CallPhase.terminated, reason: 'cleanup_done');
+    // ★ UI 즉시 반응: terminated 먼저 전이 (RTDB write 결과와 독립)
+    // 오프라인이어도 MonitoringScreen 이 즉시 dialog/pop 하도록.
+    if (_callId != null) {
+      final cid = _callId!;
+      _callId = null;
+      _fsm.to(CallPhase.terminated, reason: 'cleanup_done');
+      // RTDB 정리는 best-effort background — 실패해도 UI 영향 없음.
+      // signaling_service 쪽 writeOrTimeout / 노드 존재 체크로 orphan 방어됨.
+      () async {
+        try {
+          await _signaling.endCall(cid);
+        } catch (e) {
+          print('시그널링: endCall 실패 (무시) $e');
+        }
+        await Future.delayed(const Duration(seconds: 2));
+        try {
+          await _signaling.cleanupCall(cid);
+        } catch (e) {
+          print('시그널링: cleanupCall 실패 (무시) $e');
+        }
+      }();
+    } else {
+      _fsm.to(CallPhase.terminated, reason: 'cleanup_done');
+    }
   }
 
   // ─── 리소스 해제 ───

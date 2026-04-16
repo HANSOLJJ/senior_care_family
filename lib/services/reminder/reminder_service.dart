@@ -202,17 +202,13 @@ class ReminderService with FirebaseInstancesMixin {
     // 2. 미디어 길이 측정은 caller가 전달 (image_picker의 duration)
 
     // 3. RTDB 쓰기
-    final createdByName = user.displayName ?? '가족';
-    final repeatLabel = repeat == 'daily' ? '매일' : repeat;
-    final label = '$title $time $repeatLabel by $createdByName [ON]';
     final reminderRef = db.ref('families/$familyId/reminders/$reminderId');
     await writeOrTimeout(
       () => reminderRef.set({
-        '_label': label,
         'title': title,
         'mediaUrl': downloadUrl,
         'mediaType': mediaType,
-        'mediaDuration': 0, // edit screen에서 설정
+        'mediaDuration': 0,
         'schedule': {
           'time': time,
           'repeat': repeat,
@@ -220,10 +216,7 @@ class ReminderService with FirebaseInstancesMixin {
         },
         'enabled': true,
         'createdBy': user.uid,
-        'createdByName': createdByName,
         'mediaDownloaded': false,
-        'targetDeviceId': null,
-        'targetDeviceName': null,
         'createdAt': ServerValue.timestamp,
         'updatedAt': ServerValue.timestamp,
       }),

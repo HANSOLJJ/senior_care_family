@@ -121,12 +121,9 @@ class PhotoTransferService with FirebaseInstancesMixin {
     print('Storage 썸네일 업로드 완료: $thumbPath (${thumbBytes.length} bytes)');
 
     // 6. RTDB 메타데이터 등록
-    final uploadedByName = user.displayName ?? '가족';
-    final label = '$fileName (pending, $uploadedByName)';
     final metaRef = db.ref('families/$familyId/photoSync/$photoId');
     await writeOrTimeout(
       () => metaRef.set({
-        '_label': label,
         'fileName': fileName,
         'size': compressed.length,
         'checksum': checksum,
@@ -135,7 +132,6 @@ class PhotoTransferService with FirebaseInstancesMixin {
         'thumbUrl': thumbUrl,
         'thumbPath': thumbPath,
         'uploadedBy': user.uid,
-        'uploadedByName': uploadedByName,
         'createdAt': ServerValue.timestamp,
         'status': 'pending',
         'retryCount': 0,
