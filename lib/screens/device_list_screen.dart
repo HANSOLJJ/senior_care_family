@@ -6,9 +6,11 @@ import '../services/auth_service.dart';
 import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
 import '../services/presence_util.dart';
+import '../theme/app_theme.dart';
 import '../widgets/safe_state_mixin.dart';
 import '../widgets/tap_guard.dart';
 import '../widgets/press_scale.dart';
+import '../widgets/theme_switcher_button.dart';
 import 'family_detail_screen.dart';
 import 'pairing_screen.dart';
 
@@ -316,35 +318,27 @@ class _DeviceListScreenState extends State<DeviceListScreen>
 
     // 가족 2명+ → 목록
     return Scaffold(
-      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black,
         title: const Text('가족 선택'),
         automaticallyImplyLeading: false,
         actions: [
+          const ThemeSwitcherButton(),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white70),
-            color: Colors.grey[900],
+            icon: const Icon(Icons.more_vert),
             onSelected: (value) {
               HapticFeedback.selectionClick();
               if (value == 'add') _menuGuard.run(_addFamily);
               if (value == 'logout') _menuGuard.run(() async => AuthService().signOut());
             },
             itemBuilder: (_) => [
-              const PopupMenuItem(
-                value: 'add',
-                child: Text('가족 추가', style: TextStyle(color: Colors.white)),
-              ),
-              const PopupMenuItem(
-                value: 'logout',
-                child: Text('로그아웃', style: TextStyle(color: Colors.white)),
-              ),
+              const PopupMenuItem(value: 'add', child: Text('가족 추가')),
+              const PopupMenuItem(value: 'logout', child: Text('로그아웃')),
             ],
           ),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: Colors.white))
+          ? const Center(child: CircularProgressIndicator())
           : ListView.builder(
               padding: const EdgeInsets.all(16),
               itemCount: widget.familyIds.length,
@@ -352,6 +346,11 @@ class _DeviceListScreenState extends State<DeviceListScreen>
                 final familyId = widget.familyIds[index];
                 final name = _familyLabel(familyId, index);
                 final isOnline = _onlineStatus[familyId] ?? false;
+                final cs = Theme.of(context).colorScheme;
+                final successColor =
+                    Theme.of(context).extension<AppColorExt>()!.success;
+                final offlineColor =
+                    Theme.of(context).extension<AppColorExt>()!.textSecondary;
 
                 return ValueListenableBuilder<bool>(
                   valueListenable: _openFamilyGuard.isBusy,
@@ -364,24 +363,42 @@ class _DeviceListScreenState extends State<DeviceListScreen>
                                 .run(() => _openFamily(familyId, name));
                           },
                     child: Card(
-                      color: Colors.grey[900],
                       margin: const EdgeInsets.only(bottom: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                        side: BorderSide(
+                          color: cs.primary.withValues(alpha: 0.3),
+                          width: 1,
+                        ),
+                      ),
                       child: ListTile(
                         contentPadding: const EdgeInsets.symmetric(
                           horizontal: 20,
                           vertical: 12,
                         ),
+                        leading: Container(
+                          width: 40,
+                          height: 40,
+                          decoration: BoxDecoration(
+                            color: cs.primary.withValues(alpha: 0.15),
+                            shape: BoxShape.circle,
+                          ),
+                          child: Icon(
+                            Icons.home_outlined,
+                            color: cs.primary,
+                            size: 22,
+                          ),
+                        ),
                         title: Text(
                           name,
                           style: const TextStyle(
-                            color: Colors.white,
                             fontSize: 18,
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                         trailing: Icon(
                           Icons.circle,
-                          color: isOnline ? Colors.green : Colors.grey[600],
+                          color: isOnline ? successColor : offlineColor,
                           size: 14,
                         ),
                         onTap: null,

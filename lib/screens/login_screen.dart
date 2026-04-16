@@ -80,8 +80,8 @@ class _LoginScreenState extends State<LoginScreen> {
   /// - **Returns**: `Widget` — 전체 화면 (검은 배경)
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.black,
       body: SafeArea(
         child: Center(
           child: Padding(
@@ -90,12 +90,11 @@ class _LoginScreenState extends State<LoginScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 // ─── 로고 + 타이틀 ───
-                const Icon(Icons.family_restroom, color: Colors.white, size: 80),
+                Icon(Icons.family_restroom, color: cs.primary, size: 80),
                 const SizedBox(height: 24),
                 const Text(
                   'Senior Care Family',
                   style: TextStyle(
-                    color: Colors.white,
                     fontSize: 28,
                     fontWeight: FontWeight.bold,
                   ),
@@ -103,7 +102,7 @@ class _LoginScreenState extends State<LoginScreen> {
                 const SizedBox(height: 8),
                 const Text(
                   '가족과 함께하는 시니어 케어',
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                  style: TextStyle(fontSize: 14),
                 ),
                 const SizedBox(height: 48),
 
@@ -113,14 +112,14 @@ class _LoginScreenState extends State<LoginScreen> {
                     padding: const EdgeInsets.only(bottom: 16),
                     child: Text(
                       _error!,
-                      style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                      style: TextStyle(color: cs.error, fontSize: 13),
                       textAlign: TextAlign.center,
                     ),
                   ),
 
                 // ─── 로딩 or 로그인 버튼 4개 ───
                 if (_loading)
-                  const CircularProgressIndicator(color: Colors.white)
+                  const CircularProgressIndicator()
                 else ...[
                   _LoginButton(
                     label: 'Google로 로그인',

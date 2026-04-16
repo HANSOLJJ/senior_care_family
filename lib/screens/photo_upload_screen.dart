@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:image_picker/image_picker.dart';
 import '../services/photo_transfer_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/safe_state_mixin.dart';
 import '../widgets/tap_guard.dart';
 import '../widgets/press_scale.dart';
@@ -198,16 +199,26 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   /// - **UI**: 갤러리(다중) / 카메라(단일) 선택지 표시
   /// - **호출**: FAB "사진 보내기" 버튼 탭 시
   void _showPickerDialog() {
+    final cs = Theme.of(context).colorScheme;
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
       builder: (_) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            const SizedBox(height: 8),
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white.withValues(alpha: 0.2),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 8),
             ListTile(
-              leading: const Icon(Icons.photo_library, color: Colors.white),
-              title: const Text('갤러리에서 선택 (여러 장)', style: TextStyle(color: Colors.white)),
+              leading: Icon(Icons.photo_library, color: cs.primary),
+              title: const Text('갤러리에서 선택 (여러 장)'),
               onTap: () {
                 HapticFeedback.lightImpact();
                 Navigator.pop(context);
@@ -215,14 +226,15 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               },
             ),
             ListTile(
-              leading: const Icon(Icons.camera_alt, color: Colors.white),
-              title: const Text('카메라로 촬영', style: TextStyle(color: Colors.white)),
+              leading: Icon(Icons.camera_alt, color: cs.primary),
+              title: const Text('카메라로 촬영'),
               onTap: () {
                 HapticFeedback.lightImpact();
                 Navigator.pop(context);
                 _pickerGuard.run(_pickCameraAndUpload);
               },
             ),
+            const SizedBox(height: 8),
           ],
         ),
       ),
@@ -237,12 +249,10 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   /// - **UI**: 썸네일 확대 + 메타데이터(보낸 사람/날짜/용량/상태) + 삭제 버튼(done일 때만)
   /// - **호출**: 그리드 타일 탭 시
   void _showPhotoDetail(_PhotoItem photo) {
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
     showModalBottomSheet(
       context: context,
-      backgroundColor: Colors.grey[900],
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
       isScrollControlled: true,
       builder: (_) => SafeArea(
         child: SingleChildScrollView(
@@ -253,7 +263,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               // 썸네일 확대 표시
               if (photo.thumbUrl.isNotEmpty)
                 ClipRRect(
-                  borderRadius: BorderRadius.circular(8),
+                  borderRadius: BorderRadius.circular(12),
                   child: CachedNetworkImage(
                     imageUrl: photo.thumbUrl,
                     width: 200,
@@ -262,14 +272,14 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
                     placeholder: (_, _) => Container(
                       width: 200,
                       height: 200,
-                      color: Colors.grey[800],
+                      color: cs.surface,
                       child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
                     ),
                     errorWidget: (_, _, _) => Container(
                       width: 200,
                       height: 200,
-                      color: Colors.grey[800],
-                      child: const Icon(Icons.broken_image, color: Colors.grey, size: 48),
+                      color: cs.surface,
+                      child: Icon(Icons.broken_image, color: ext.textSecondary, size: 48),
                     ),
                   ),
                 ),
@@ -292,7 +302,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
                     icon: const Icon(Icons.delete_outline),
                     label: const Text('시니어 기기에서 삭제'),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.red[700],
+                      backgroundColor: cs.error,
                       foregroundColor: Colors.white,
                     ),
                   ),
@@ -311,16 +321,17 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   ///   - [value] — 우측 값 (예: "홍길동")
   /// - **Returns**: `Widget` — 한 행의 Row
   Widget _detailRow(String label, String value) {
+    final ext = Theme.of(context).extension<AppColorExt>()!;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 4),
       child: Row(
         children: [
           SizedBox(
             width: 70,
-            child: Text(label, style: const TextStyle(color: Colors.white54, fontSize: 14)),
+            child: Text(label, style: TextStyle(color: ext.textSecondary, fontSize: 14)),
           ),
           Expanded(
-            child: Text(value, style: const TextStyle(color: Colors.white, fontSize: 14)),
+            child: Text(value, style: const TextStyle(fontSize: 14)),
           ),
         ],
       ),
@@ -337,19 +348,18 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   void _confirmDelete(String photoId) {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('사진 삭제', style: TextStyle(color: Colors.white)),
-        content: const Text('이 사진을 시니어 기기에서 삭제하시겠습니까?', style: TextStyle(color: Colors.white70)),
+      builder: (ctx) => AlertDialog(
+        title: const Text('사진 삭제'),
+        content: const Text('이 사진을 시니어 기기에서 삭제하시겠습니까?'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('취소')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소')),
           TextButton(
             onPressed: () {
               HapticFeedback.mediumImpact();
-              Navigator.pop(context);
+              Navigator.pop(ctx);
               _deleteGuard.run(() => _service.deletePhoto(widget.familyId, photoId));
             },
-            child: const Text('삭제', style: TextStyle(color: Colors.red)),
+            child: Text('삭제', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
           ),
         ],
       ),
@@ -379,10 +389,10 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   @override
   Widget build(BuildContext context) {
     final photos = _sortedPhotos;
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
     return Scaffold(
-      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black,
         title: Text('사진 보내기${photos.isNotEmpty ? ' (${photos.length})' : ''}'),
       ),
       body: Column(
@@ -393,13 +403,13 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               child: Column(
                 children: [
-                  LinearProgressIndicator(value: _uploadProgress, color: Colors.blue),
+                  LinearProgressIndicator(value: _uploadProgress),
                   const SizedBox(height: 4),
                   Text(
                     _uploadTotal > 1
                         ? '업로드 중... $_uploadCurrent/$_uploadTotal (${(_uploadProgress * 100).toInt()}%)'
                         : '업로드 중... ${(_uploadProgress * 100).toInt()}%',
-                    style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    style: TextStyle(color: ext.textSecondary, fontSize: 13),
                   ),
                 ],
               ),
@@ -407,22 +417,22 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
 
           // 안내 텍스트
           if (photos.isNotEmpty)
-            const Padding(
-              padding: EdgeInsets.fromLTRB(16, 12, 16, 4),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
               child: Text(
                 '시니어 기기 슬라이드쇼에 표시 중인 사진',
-                style: TextStyle(color: Colors.white54, fontSize: 13),
+                style: TextStyle(color: ext.textSecondary, fontSize: 13),
               ),
             ),
 
           // 사진 그리드 (4열) 또는 빈 상태 메시지
           Expanded(
             child: photos.isEmpty
-                ? const Center(
+                ? Center(
                     child: Text(
                       '보낸 사진이 없습니다\n아래 버튼으로 사진을 보내보세요',
                       textAlign: TextAlign.center,
-                      style: TextStyle(color: Colors.white38, fontSize: 16),
+                      style: TextStyle(color: ext.textSecondary, fontSize: 16),
                     ),
                   )
                 : GridView.builder(
@@ -450,7 +460,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
           onPressed: _uploading ? null : _showPickerDialog,
           icon: const Icon(Icons.add_photo_alternate),
           label: const Text('사진 보내기'),
-          backgroundColor: _uploading ? Colors.grey : Colors.blue,
+          backgroundColor: _uploading ? ext.textSecondary : cs.primary,
+          foregroundColor: Colors.black,
         ),
       ),
     );
@@ -463,6 +474,8 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   /// - **Returns**: `Widget` — 썸네일 + 상태 아이콘 오버레이
   /// - **탭 동작**: [_showPhotoDetail] 바텀시트 열림
   Widget _buildGridTile(_PhotoItem photo) {
+    final surface = Theme.of(context).colorScheme.surface;
+    final iconColor = Theme.of(context).extension<AppColorExt>()!.textSecondary;
     return GestureDetector(
       onTap: () => _showPhotoDetail(photo),
       child: Stack(
@@ -473,15 +486,15 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               ? CachedNetworkImage(
                   imageUrl: photo.thumbUrl,
                   fit: BoxFit.cover,
-                  placeholder: (_, _) => Container(color: Colors.grey[800]),
+                  placeholder: (_, _) => Container(color: surface),
                   errorWidget: (_, _, _) => Container(
-                    color: Colors.grey[800],
-                    child: const Icon(Icons.image, color: Colors.white38, size: 32),
+                    color: surface,
+                    child: Icon(Icons.image, color: iconColor, size: 32),
                   ),
                 )
               : Container(
-                  color: Colors.grey[800],
-                  child: const Icon(Icons.image, color: Colors.white38, size: 32),
+                  color: surface,
+                  child: Icon(Icons.image, color: iconColor, size: 32),
                 ),
           // 상태 아이콘 (done이 아닌 경우에만 표시)
           if (photo.status != 'done')
@@ -491,7 +504,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               child: Container(
                 padding: const EdgeInsets.all(2),
                 decoration: BoxDecoration(
-                  color: Colors.black54,
+                  color: Colors.black.withValues(alpha: 0.5),
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: _statusIcon(photo.status),
@@ -514,20 +527,22 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
   ///   - done: 초록 체크 (전송 완료)
   ///   - expired: 빨간 에러 (만료)
   Widget _statusIcon(String status) {
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
     switch (status) {
       case 'pending':
-        return const Icon(Icons.schedule, color: Colors.orange, size: 18);
+        return Icon(Icons.schedule, color: ext.warning, size: 18);
       case 'downloading':
-        return const SizedBox(
+        return SizedBox(
           width: 18, height: 18,
-          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+          child: CircularProgressIndicator(strokeWidth: 2, color: cs.primary),
         );
       case 'done':
-        return const Icon(Icons.check_circle, color: Colors.green, size: 18);
+        return Icon(Icons.check_circle, color: ext.success, size: 18);
       case 'expired':
-        return const Icon(Icons.error_outline, color: Colors.red, size: 18);
+        return Icon(Icons.error_outline, color: cs.error, size: 18);
       default:
-        return const Icon(Icons.help_outline, color: Colors.grey, size: 18);
+        return Icon(Icons.help_outline, color: ext.textSecondary, size: 18);
     }
   }
 

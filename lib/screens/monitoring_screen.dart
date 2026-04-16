@@ -8,8 +8,8 @@ import '../services/call/call_state_machine.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
 import '../services/network_guard.dart';
+import '../theme/app_theme.dart';
 import '../widgets/tap_guard.dart';
-import '../widgets/press_scale.dart';
 
 /// (`StatefulWidget`) 모니터링 / 통화 통합 화면
 ///
@@ -539,6 +539,38 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   // ─── UI 빌드 ───
 
+  /// 하단 액션 버튼 빌더 (`Widget Builder`) — 통화 전환 / 종료 공통
+  ///
+  /// 동일한 크기(140×52) + 텍스트 + 아이콘으로 FAB 대신 일관된 버튼.
+  Widget _buildActionButton({
+    required String label,
+    required IconData icon,
+    required Color backgroundColor,
+    required Color foregroundColor,
+    required VoidCallback? onPressed,
+  }) {
+    return SizedBox(
+      width: 140,
+      height: 52,
+      child: ElevatedButton.icon(
+        onPressed: onPressed,
+        icon: Icon(icon, size: 20),
+        label: Text(
+          label,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
+        ),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: backgroundColor,
+          foregroundColor: foregroundColor,
+          disabledBackgroundColor: backgroundColor.withValues(alpha: 0.5),
+          disabledForegroundColor: foregroundColor.withValues(alpha: 0.7),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+          elevation: 4,
+        ),
+      ),
+    );
+  }
+
   /// (`Widget Builder`) 전체 화면 구성 — 원격 영상 + 로컬 PIP + 상태 배지 + 하단 버튼
   ///
   /// - **Returns**: `Widget` — 검은 배경 Scaffold에 Stack 레이아웃
@@ -570,7 +602,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                 height: 160,
                 decoration: BoxDecoration(
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.white, width: 2),
+                  border: Border.all(color: Theme.of(context).colorScheme.primary, width: 2),
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: RTCVideoView(
@@ -589,7 +621,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                 children: [
                   Icon(
                     _isCall ? Icons.videocam : Icons.camera_outdoor,
-                    color: Colors.white,
+                    color: Theme.of(context).colorScheme.primary,
                     size: 64,
                   ),
                   const SizedBox(height: 24),
@@ -607,49 +639,56 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
                     style: const TextStyle(color: Colors.white70, fontSize: 16),
                   ),
                   const SizedBox(height: 24),
-                  const CircularProgressIndicator(color: Colors.white),
+                  const CircularProgressIndicator(),
                 ],
               ),
             ),
 
-          // 상단 상태 배지
+          // 상단 상태 배지 — 영상 위 오버레이라 검정 반투명 bg 유지
           if (_connected)
-            Positioned(
-              top: 40,
-              left: 16,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                decoration: BoxDecoration(
-                  color: Colors.black54,
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      _upgraded
-                          ? Icons.videocam
-                          : (_waitingAcceptance ? Icons.hourglass_top : Icons.remove_red_eye),
-                      color: _upgraded
-                          ? Colors.green
-                          : (_waitingAcceptance ? Colors.amber : Colors.orange),
-                      size: 16,
+            Builder(
+              builder: (context) {
+                final cs = Theme.of(context).colorScheme;
+                final ext = Theme.of(context).extension<AppColorExt>()!;
+                final badgeColor = _upgraded
+                    ? ext.success
+                    : (_waitingAcceptance ? ext.warning : cs.primary);
+                return Positioned(
+                  top: 40,
+                  left: 16,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: Colors.black54,  // 영상 위 반투명 — 의도적 유지
+                      borderRadius: BorderRadius.circular(16),
                     ),
-                    const SizedBox(width: 6),
-                    Text(
-                      _upgraded
-                          ? '통화 중'
-                          : (_waitingAcceptance
-                              ? '$_displayName 수락 대기 ($_phase2RemainingSec초)'
-                              : '모니터링'),
-                      style: const TextStyle(color: Colors.white, fontSize: 14),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _upgraded
+                              ? Icons.videocam
+                              : (_waitingAcceptance ? Icons.hourglass_top : Icons.remove_red_eye),
+                          color: badgeColor,
+                          size: 16,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          _upgraded
+                              ? '통화 중'
+                              : (_waitingAcceptance
+                                  ? '$_displayName 수락 대기 ($_phase2RemainingSec초)'
+                                  : '모니터링'),
+                          style: const TextStyle(color: Colors.white, fontSize: 14),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
+                );
+              },
             ),
 
-          // 하단 버튼
+          // 하단 버튼 — 동일 크기 (140×52), 간격 12
           Positioned(
             bottom: 40,
             left: 0,
@@ -658,46 +697,38 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
                 // 통화 전환 버튼 (모니터링 중 + 다른 가족이 통화 중이지 않을 때)
-                if (_connected && !_isCall && !_upgraded && !_callActiveByOther)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: ValueListenableBuilder<bool>(
-                      valueListenable: _upgradeGuard.isBusy,
-                      builder: (context, busy, _) => PressScale(
-                        onTap: busy
-                            ? null
-                            : () {
-                                HapticFeedback.lightImpact();
-                                _upgradeGuard.run(_upgradeToCall);
-                              },
-                        child: FloatingActionButton.extended(
-                          heroTag: 'upgrade',
-                          onPressed: busy
-                              ? null
-                              : () {
-                                  HapticFeedback.lightImpact();
-                                  _upgradeGuard.run(_upgradeToCall);
-                                },
-                          backgroundColor: Colors.green,
-                          icon: const Icon(Icons.videocam),
-                          label: const Text('통화 전환'),
-                        ),
-                      ),
+                if (_connected && !_isCall && !_upgraded && !_callActiveByOther) ...[
+                  ValueListenableBuilder<bool>(
+                    valueListenable: _upgradeGuard.isBusy,
+                    builder: (context, busy, _) => _buildActionButton(
+                      label: '통화 전환',
+                      icon: Icons.videocam,
+                      backgroundColor: Theme.of(context).colorScheme.primary,
+                      foregroundColor: Colors.black,
+                      onPressed: busy
+                          ? null
+                          : () {
+                              HapticFeedback.lightImpact();
+                              _upgradeGuard.run(_upgradeToCall);
+                            },
                     ),
                   ),
+                  const SizedBox(width: 12),
+                ],
                 // 종료 버튼
                 ValueListenableBuilder<bool>(
                   valueListenable: _hangUpGuard.isBusy,
-                  builder: (context, busy, _) => FloatingActionButton(
-                    heroTag: 'hangup',
+                  builder: (context, busy, _) => _buildActionButton(
+                    label: '종료',
+                    icon: Icons.call_end,
+                    backgroundColor: Theme.of(context).colorScheme.error,
+                    foregroundColor: Colors.white,
                     onPressed: busy
                         ? null
                         : () {
                             HapticFeedback.mediumImpact();
                             _hangUpGuard.run(_hangUp);
                           },
-                    backgroundColor: Colors.red,
-                    child: const Icon(Icons.call_end, size: 32),
                   ),
                 ),
               ],

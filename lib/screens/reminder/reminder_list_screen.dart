@@ -5,6 +5,7 @@ import '../../services/reminder/reminder_service.dart';
 import '../../widgets/safe_state_mixin.dart';
 import '../../widgets/tap_guard.dart';
 import '../../widgets/press_scale.dart';
+import '../../theme/app_theme.dart';
 import 'reminder_edit_screen.dart';
 
 /// 영상 알림 목록 화면 (`StatefulWidget`)
@@ -140,7 +141,7 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
           ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('삭제', style: TextStyle(color: Colors.red)),
+            child: Text('삭제', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
           ),
         ],
       ),
@@ -199,11 +200,13 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(Icons.notifications_none,
-                          size: 64, color: Colors.grey.shade400),
+                          size: 64,
+                          color: Theme.of(context).extension<AppColorExt>()!.textSecondary),
                       const SizedBox(height: 16),
                       Text('등록된 알림이 없습니다',
                           style: TextStyle(
-                              fontSize: 16, color: Colors.grey.shade600)),
+                              fontSize: 16,
+                              color: Theme.of(context).extension<AppColorExt>()!.textSecondary)),
                       const SizedBox(height: 24),
                       ValueListenableBuilder<bool>(
                         valueListenable: _addGuard.isBusy,
@@ -245,6 +248,7 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
   ///   - 길게 누르기: _deleteReminder (삭제 확인)
   ///   - Switch: toggleReminder (ON/OFF 토글)
   Widget _buildReminderTile(Reminder reminder) {
+    final dimmed = Theme.of(context).extension<AppColorExt>()!.textSecondary;
     return PressScale(
       onTap: () {
         HapticFeedback.lightImpact();
@@ -253,20 +257,22 @@ class _ReminderListScreenState extends State<ReminderListScreen> with SafeStateM
       child: ListTile(
       leading: Icon(
         reminder.mediaType == 'video' ? Icons.videocam : Icons.mic,
-        color: reminder.enabled ? Colors.deepPurple : Colors.grey,
+        color: reminder.enabled
+            ? Theme.of(context).colorScheme.primary
+            : dimmed,
         size: 32,
       ),
       title: Text(
         reminder.title,
         style: TextStyle(
           fontWeight: FontWeight.w600,
-          color: reminder.enabled ? null : Colors.grey,
+          color: reminder.enabled ? null : dimmed,
         ),
       ),
       subtitle: Text(
         '${reminder.repeatLabel}  ${reminder.time}',
         style: TextStyle(
-          color: reminder.enabled ? null : Colors.grey,
+          color: reminder.enabled ? null : dimmed,
         ),
       ),
       trailing: ValueListenableBuilder<bool>(

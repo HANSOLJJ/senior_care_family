@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../services/reminder/reminder_service.dart';
+import '../../theme/app_theme.dart';
 import '../../widgets/safe_state_mixin.dart';
 import '../../widgets/press_scale.dart';
 
@@ -301,10 +303,11 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
 
   /// 미디어 선택 영역 위젯 (`Widget Builder`)
   ///
-  /// - 새 파일 선택됨: 파일명 + 제거 버튼 (초록색 컨테이너)
-  /// - 기존 미디어 유지: "기존 미디어 유지" 안내 (파란색 컨테이너)
+  /// - 새 파일 선택됨: 파일명 + 제거 버튼 (primary 테두리)
+  /// - 기존 미디어 유지: "기존 미디어 유지" 안내 (중립 테두리)
   /// - 녹화 / 갤러리 선택 버튼 2개
   Widget _buildMediaPicker() {
+    final cs = Theme.of(context).colorScheme;
     return Column(
       children: [
         if (_mediaFile != null)
@@ -312,15 +315,15 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
             width: double.infinity,
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: Colors.green.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.green.shade200),
+              color: cs.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: cs.primary.withValues(alpha: 0.6)),
             ),
             child: Row(
               children: [
                 Icon(
                   _mediaType == 'video' ? Icons.videocam : Icons.mic,
-                  color: Colors.green,
+                  color: cs.primary,
                 ),
                 const SizedBox(width: 8),
                 Expanded(
@@ -337,25 +340,28 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
             ),
           )
         else if (_hasExistingMedia)
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.all(12),
-            decoration: BoxDecoration(
-              color: Colors.blue.shade50,
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.blue.shade200),
-            ),
-            child: Row(
-              children: [
-                Icon(
-                  _mediaType == 'video' ? Icons.videocam : Icons.mic,
-                  color: Colors.blue,
-                ),
-                const SizedBox(width: 8),
-                const Text('기존 미디어 유지 (변경하려면 아래 버튼)'),
-              ],
-            ),
-          ),
+          Builder(builder: (context) {
+            final ext = Theme.of(context).extension<AppColorExt>()!;
+            return Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: ext.textSecondary.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                children: [
+                  Icon(
+                    _mediaType == 'video' ? Icons.videocam : Icons.mic,
+                    color: ext.textSecondary,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('기존 미디어 유지 (변경하려면 아래 버튼)'),
+                ],
+              ),
+            );
+          }),
         const SizedBox(height: 8),
         Row(
           children: [
@@ -388,27 +394,21 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
 
   /// 시간 선택 위젯 — 오전/오후 12시간 표시 (`Widget Builder`)
   ///
-  /// 탭하면 TimePicker 다이얼로그 표시.
+  /// 탭하면 CupertinoDatePicker 바텀시트 표시 (스크롤 휠, 한국어).
   Widget _buildTimePicker() {
+    final cs = Theme.of(context).colorScheme;
     final isPm = _time.hour >= 12;
     final display12 = _time.hourOfPeriod == 0 ? 12 : _time.hourOfPeriod;
     final amPm = isPm ? '오후' : '오전';
     final timeStr = '${display12.toString().padLeft(2, '0')}:${_time.minute.toString().padLeft(2, '0')}';
 
     return InkWell(
-      onTap: () async {
-        final picked = await showTimePicker(
-          context: context,
-          initialTime: _time,
-          initialEntryMode: TimePickerEntryMode.input,
-        );
-        if (picked != null) setState(() => _time = picked);
-      },
+      onTap: _showTimePickerSheet,
       borderRadius: BorderRadius.circular(12),
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         decoration: BoxDecoration(
-          color: Colors.grey.shade100,
+          color: cs.surface,
           borderRadius: BorderRadius.circular(12),
         ),
         child: Row(
@@ -419,7 +419,7 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
               style: TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.bold,
-                color: isPm ? Colors.indigo : Colors.orange.shade800,
+                color: cs.primary,
               ),
             ),
             const SizedBox(width: 12),
@@ -427,6 +427,87 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
               timeStr,
               style: const TextStyle(fontSize: 32, fontWeight: FontWeight.bold),
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// CupertinoDatePicker 바텀시트 표시 (`Method`, async)
+  ///
+  /// 스크롤 휠 + 오전/오후 한국어. 완료 버튼 탭 시 _time 확정.
+  Future<void> _showTimePickerSheet() async {
+    final cs = Theme.of(context).colorScheme;
+    TimeOfDay temp = _time;
+
+    await showModalBottomSheet(
+      context: context,
+      backgroundColor: cs.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx),
+                    child: Text(
+                      '취소',
+                      style: TextStyle(
+                        color: Theme.of(ctx).extension<AppColorExt>()!.textSecondary,
+                      ),
+                    ),
+                  ),
+                  const Text(
+                    '알림 시간',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                  ),
+                  TextButton(
+                    onPressed: () {
+                      setState(() => _time = temp);
+                      Navigator.pop(ctx);
+                    },
+                    child: Text(
+                      '완료',
+                      style: TextStyle(
+                        color: cs.primary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            SizedBox(
+              height: 216,
+              child: CupertinoTheme(
+                data: CupertinoThemeData(
+                  brightness: Brightness.dark,
+                  textTheme: CupertinoTextThemeData(
+                    dateTimePickerTextStyle: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontFamily: 'Pretendard',
+                    ),
+                  ),
+                ),
+                child: CupertinoDatePicker(
+                  mode: CupertinoDatePickerMode.time,
+                  initialDateTime: DateTime(2000, 1, 1, _time.hour, _time.minute),
+                  use24hFormat: false,
+                  onDateTimeChanged: (dt) {
+                    temp = TimeOfDay(hour: dt.hour, minute: dt.minute);
+                  },
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
           ],
         ),
       ),

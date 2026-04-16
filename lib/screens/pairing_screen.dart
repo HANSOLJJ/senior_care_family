@@ -134,14 +134,13 @@ class _PairingScreenState extends State<PairingScreen> {
   /// - **호출**: Flutter 프레임워크 (setState 시 재호출)
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black,
         title: const Text('기기 연결'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.logout, color: Colors.white70),
+            icon: const Icon(Icons.logout),
             onPressed: () => AuthService().signOut(),
             tooltip: '로그아웃',
           ),
@@ -156,12 +155,11 @@ class _PairingScreenState extends State<PairingScreen> {
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                const Icon(Icons.link, color: Colors.white, size: 64),
+                Icon(Icons.link, color: cs.primary, size: 64),
                 const SizedBox(height: 24),
                 const Text(
                   '시니어 기기와 연결',
                   style: TextStyle(
-                    color: Colors.white,
                     fontSize: 24,
                     fontWeight: FontWeight.bold,
                   ),
@@ -169,7 +167,7 @@ class _PairingScreenState extends State<PairingScreen> {
                 const SizedBox(height: 12),
                 const Text(
                   '시니어 태블릿에 표시된\n페어링 코드를 입력하거나 QR을 스캔하세요',
-                  style: TextStyle(color: Colors.white70, fontSize: 14),
+                  style: TextStyle(fontSize: 14),
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 36),
@@ -179,7 +177,6 @@ class _PairingScreenState extends State<PairingScreen> {
                   controller: _codeController,
                   textAlign: TextAlign.center,
                   style: const TextStyle(
-                    color: Colors.white,
                     fontSize: 32,
                     fontWeight: FontWeight.bold,
                     letterSpacing: 8,
@@ -189,23 +186,10 @@ class _PairingScreenState extends State<PairingScreen> {
                     FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
                     LengthLimitingTextInputFormatter(6),
                   ],
-                  decoration: InputDecoration(
+                  decoration: const InputDecoration(
                     hintText: '코드 입력',
-                    hintStyle: TextStyle(
-                      color: Colors.grey[600],
-                      fontSize: 24,
-                      letterSpacing: 4,
-                    ),
-                    filled: true,
-                    fillColor: Colors.grey[900],
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 20,
-                      vertical: 16,
-                    ),
+                    hintStyle: TextStyle(fontSize: 24, letterSpacing: 4),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 20, vertical: 16),
                   ),
                   onSubmitted: (_) => _submitCode(),
                 ),
@@ -216,7 +200,7 @@ class _PairingScreenState extends State<PairingScreen> {
                     padding: const EdgeInsets.only(bottom: 16),
                     child: Text(
                       _error!,
-                      style: const TextStyle(color: Colors.redAccent, fontSize: 13),
+                      style: TextStyle(color: cs.error, fontSize: 13),
                       textAlign: TextAlign.center,
                     ),
                   ),
@@ -226,29 +210,21 @@ class _PairingScreenState extends State<PairingScreen> {
                   onTap: _loading ? null : () => _submitCode(),
                   child: SizedBox(
                     width: double.infinity,
-                    height: 48,
+                    height: 52,
                     child: ElevatedButton(
                       onPressed: _loading ? null : () => _submitCode(),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.blue,
-                        disabledBackgroundColor: Colors.blue.withValues(alpha: 0.5),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                      ),
                       child: _loading
                           ? const SizedBox(
                               width: 24,
                               height: 24,
                               child: CircularProgressIndicator(
-                                color: Colors.white,
+                                color: Colors.black,
                                 strokeWidth: 2,
                               ),
                             )
                           : const Text(
                               '연결하기',
                               style: TextStyle(
-                                color: Colors.white,
                                 fontSize: 18,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -263,19 +239,13 @@ class _PairingScreenState extends State<PairingScreen> {
                   onTap: _loading ? null : _openQrScanner,
                   child: SizedBox(
                     width: double.infinity,
-                    height: 48,
+                    height: 52,
                     child: OutlinedButton.icon(
                       onPressed: _loading ? null : _openQrScanner,
-                      icon: const Icon(Icons.qr_code_scanner, color: Colors.white),
+                      icon: const Icon(Icons.qr_code_scanner),
                       label: const Text(
                         'QR 코드 스캔',
-                        style: TextStyle(color: Colors.white, fontSize: 16),
-                      ),
-                      style: OutlinedButton.styleFrom(
-                        side: const BorderSide(color: Colors.white38),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
-                        ),
+                        style: TextStyle(fontSize: 16),
                       ),
                     ),
                   ),
@@ -367,8 +337,9 @@ class _QrScanScreenState extends State<_QrScanScreen> {
   /// - **호출**: Flutter 프레임워크
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     return Scaffold(
-      backgroundColor: Colors.black,
+      backgroundColor: Colors.black,  // 카메라 렌더링 배경 — 의도적 검정
       appBar: AppBar(
         backgroundColor: Colors.black,
         title: const Text('QR 코드 스캔'),
@@ -385,7 +356,7 @@ class _QrScanScreenState extends State<_QrScanScreen> {
               width: 250,
               height: 250,
               decoration: BoxDecoration(
-                border: Border.all(color: Colors.white54, width: 2),
+                border: Border.all(color: cs.primary, width: 3),
                 borderRadius: BorderRadius.circular(16),
               ),
             ),
@@ -397,7 +368,7 @@ class _QrScanScreenState extends State<_QrScanScreen> {
             right: 0,
             child: Text(
               '시니어 태블릿의 QR 코드를\n카메라에 비춰주세요',
-              style: TextStyle(color: Colors.white70, fontSize: 16),
+              style: TextStyle(color: Colors.white, fontSize: 16),
               textAlign: TextAlign.center,
             ),
           ),

@@ -54,7 +54,7 @@ class FamilyService with FirebaseInstancesMixin {
     }
 
     // 3. 멤버로 등록
-    final name = user.displayName ?? '가족';
+    final name = (user.displayName?.isNotEmpty == true) ? user.displayName! : '가족';
     final provider = _getProvider(user);
     final memberRef = db.ref('families/$familyId/members/${user.uid}');
     await writeOrTimeout(

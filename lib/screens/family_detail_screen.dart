@@ -8,9 +8,12 @@ import '../services/family_service.dart';
 import '../services/pairing_helper.dart';
 import '../services/photo_transfer_service.dart';
 import '../services/presence_util.dart';
+import '../services/reminder/reminder_service.dart';
+import '../theme/app_theme.dart';
 import '../widgets/safe_state_mixin.dart';
 import '../widgets/tap_guard.dart';
 import '../widgets/press_scale.dart';
+import '../widgets/theme_switcher_button.dart';
 // outgoing_call_screen은 MonitoringScreen(callType:"call")으로 통합됨
 import 'photo_upload_screen.dart';
 import 'monitoring_screen.dart';
@@ -76,6 +79,21 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
 
   /// 사진 전송 서비스 (photoSync 감시용)
   final _photoService = PhotoTransferService();
+
+  /// 알림 서비스 (reminders 카운트 감시용)
+  final _reminderService = ReminderService();
+
+  /// 현재 등록된 영상 알림 수 (Hero 카드에 표시)
+  int _reminderCount = 0;
+
+  /// 알림 개수 감시 스트림 구독
+  StreamSubscription? _reminderCountSub;
+
+  /// 가족 공용 라벨 — `/families/{fid}/_label` 값 (페어링 때 설정, 모든 멤버 공유)
+  String? _familyLabel;
+
+  /// _label 실시간 감시 구독
+  StreamSubscription<DatabaseEvent>? _labelSub;
 
   /// Firebase RTDB 인스턴스
   final _db = FirebaseDatabase.instance;
@@ -159,7 +177,30 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     _watchDevices();
     _watchCallStatus();
     _watchPhotos();
+    _watchReminderCount();
+    _watchFamilyLabel();
     _loadMembers();
+  }
+
+  /// 영상 알림 개수 실시간 감시 (`Method`)
+  ///
+  /// Hero 카드에 표시할 알림 수. ReminderService 스트림 구독.
+  /// - **Side Effects**: _reminderCountSub 등록, _reminderCount 갱신
+  void _watchReminderCount() {
+    _reminderCountSub = _reminderService
+        .watchReminders(widget.familyId)
+        .listen((list) => safeSetState(() => _reminderCount = list.length));
+  }
+
+  /// 가족 공용 라벨 실시간 감시 (`Method`)
+  ///
+  /// `/families/{fid}/_label` 값을 Hero 카드에 표시. 페어링 때 저장되며
+  /// 모든 멤버가 공유. widget.familyName (user 스코프) 보다 신뢰성 있음.
+  void _watchFamilyLabel() {
+    _labelSub = _db.ref('families/${widget.familyId}/_label').onValue.listen((event) {
+      final v = event.snapshot.value;
+      safeSetState(() => _familyLabel = v is String && v.isNotEmpty ? v : null);
+    });
   }
 
   // ─── 데이터 감시 ───
@@ -376,25 +417,23 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
   void _confirmUnpair() {
     showDialog(
       context: context,
-      builder: (_) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('페어링 해제', style: TextStyle(color: Colors.white)),
+      builder: (ctx) => AlertDialog(
+        title: const Text('페어링 해제'),
         content: const Text(
           '시니어 기기와의 연결을 해제하시겠습니까?\n다시 연결하려면 페어링 코드를 입력해야 합니다.',
-          style: TextStyle(color: Colors.white70),
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(ctx),
             child: const Text('취소'),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
+              Navigator.pop(ctx);
               _familyService.leaveFamily(widget.familyId);
               if (!widget.isRoot) Navigator.of(context).pop();
             },
-            child: const Text('해제', style: TextStyle(color: Colors.red)),
+            child: Text('해제', style: TextStyle(color: Theme.of(ctx).colorScheme.error)),
           ),
         ],
       ),
@@ -440,6 +479,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     for (final s in _deviceDetailSubs) {
       s.cancel();
     }
+    _reminderCountSub?.cancel();
+    _labelSub?.cancel();
     super.dispose();
   }
 
@@ -454,18 +495,14 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
   /// - **호출**: Flutter 프레임워크 (setState 시 재호출)
   @override
   Widget build(BuildContext context) {
-    final title = widget.familyName ?? '가족';
-
     return Scaffold(
-      backgroundColor: Colors.black,
       appBar: AppBar(
-        backgroundColor: Colors.black,
-        title: Text(title),
+        // 타이틀은 Hero 카드가 hero 역할 — 중복 제거
         automaticallyImplyLeading: !widget.isRoot,
         actions: [
+          const ThemeSwitcherButton(),
           PopupMenuButton<String>(
-            icon: const Icon(Icons.more_vert, color: Colors.white70),
-            color: Colors.grey[900],
+            icon: const Icon(Icons.more_vert),
             onSelected: (value) {
               HapticFeedback.selectionClick();
               if (value == 'add') _menuGuard.run(_addFamily);
@@ -475,34 +512,34 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
             itemBuilder: (_) => [
               const PopupMenuItem(
                 value: 'add',
-                child: Text('가족 추가', style: TextStyle(color: Colors.white)),
+                child: Text('가족 추가'),
               ),
               const PopupMenuItem(
                 value: 'unpair',
-                child: Text('페어링 해제', style: TextStyle(color: Colors.white)),
+                child: Text('페어링 해제'),
               ),
               const PopupMenuItem(
                 value: 'logout',
-                child: Text('로그아웃', style: TextStyle(color: Colors.white)),
+                child: Text('로그아웃'),
               ),
             ],
           ),
         ],
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator(color: Colors.white))
+          ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   _buildDeviceStatusCard(),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: 14),
                   _buildActionButtons(),
-                  const SizedBox(height: 24),
+                  const SizedBox(height: 18),
                   if (_photoMap.isNotEmpty) ...[
                     _buildRecentPhotos(),
-                    const SizedBox(height: 24),
+                    const SizedBox(height: 18),
                   ],
                   if (_members.isNotEmpty) _buildMembersSection(),
                 ],
@@ -521,16 +558,15 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
   /// - **호출**: build()
   Widget _buildDeviceStatusCard() {
     final device = _primaryDevice;
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
+
     if (device == null) {
-      return Card(
-        color: Colors.grey[900],
-        child: const Padding(
+      return const Card(
+        child: Padding(
           padding: EdgeInsets.all(20),
           child: Center(
-            child: Text(
-              '등록된 기기가 없습니다',
-              style: TextStyle(color: Colors.white70, fontSize: 16),
-            ),
+            child: Text('등록된 기기가 없습니다', style: TextStyle(fontSize: 16)),
           ),
         ),
       );
@@ -542,49 +578,75 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     final String statusText;
 
     if (_isInCall) {
-      statusColor = Colors.orange;
+      statusColor = ext.warning;
       statusIcon = Icons.videocam;
       final callerName = _callStatus?['callerName'] ?? '';
-      statusText = callerName.isNotEmpty ? '통화 중 — $callerName' : '통화 중';
+      statusText = callerName.isNotEmpty ? '통화 중 · $callerName' : '통화 중';
     } else if (_isOnline) {
-      statusColor = Colors.green;
+      statusColor = ext.success;
       statusIcon = Icons.check_circle;
       statusText = '온라인';
     } else {
-      statusColor = Colors.grey;
+      statusColor = ext.textSecondary;
       statusIcon = Icons.circle_outlined;
       statusText = '오프라인';
     }
 
+    // 표시 단일 소스: /families/{fid}/_label (페어링 때 저장, 가족 멤버 공용)
+    final seniorName = _familyLabel ?? '가족';
+    final photoCount = _photoMap.length;
+
     return Card(
-      color: Colors.grey[900],
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(18, 14, 18, 14),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 시니어 이름 (hero) — 상태와 같은 줄에 표시
             Row(
               children: [
-                Icon(statusIcon, color: statusColor, size: 20),
-                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    seniorName,
+                    style: const TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: -0.5,
+                    ),
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                Icon(statusIcon, color: statusColor, size: 14),
+                const SizedBox(width: 4),
                 Text(
                   statusText,
                   style: TextStyle(
                     color: statusColor,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
                   ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  (device['name'] ?? '') as String,
-                  style: const TextStyle(color: Colors.white38, fontSize: 13),
                 ),
               ],
             ),
+            const SizedBox(height: 12),
+            // 정보 2개 (사진 수, 알림 수)
+            Row(
+              children: [
+                _infoChip(
+                  icon: Icons.photo_library_outlined,
+                  label: '사진 $photoCount장',
+                ),
+                const SizedBox(width: 12),
+                _infoChip(
+                  icon: Icons.notifications_outlined,
+                  label: _reminderCount > 0 ? '알림 $_reminderCount개' : '알림 없음',
+                ),
+              ],
+            ),
+            // 저장 용량
             if (device['storageTotal'] != null) ...[
               const SizedBox(height: 12),
-              _buildStorageBar(device),
+              _buildStorageBar(device, cs, ext),
             ],
           ],
         ),
@@ -592,18 +654,35 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     );
   }
 
-  /// 저장 용량 프로그레스 바 — 사용량/전체 + 사진 수 표시 (`Widget Builder`)
+  /// Hero 카드 내부 정보 칩 (사진 수 / 알림 수) (`Widget Builder`)
+  Widget _infoChip({required IconData icon, required String label}) {
+    final ext = Theme.of(context).extension<AppColorExt>()!;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, size: 16, color: ext.textSecondary),
+        const SizedBox(width: 6),
+        Text(
+          label,
+          style: TextStyle(color: ext.textSecondary, fontSize: 13),
+        ),
+      ],
+    );
+  }
+
+  /// 저장 용량 프로그레스 바 — 사용량/전체 표시 (`Widget Builder`)
   ///
-  /// 사용률에 따라 색상 변경: >90% 빨강, >75% 주황, 그 외 파랑.
+  /// 사용률에 따라 색상 변경: >90% error, >75% warning, 그 외 primary.
   ///
   /// - **Params**:
-  ///   - [device] — 기기 정보 맵 (storageTotal, storageAvailable, photoCount 포함)
+  ///   - [device] — 기기 정보 맵 (storageTotal, storageAvailable 포함)
+  ///   - [cs] — 현재 테마 ColorScheme
+  ///   - [ext] — 현재 테마 AppColorExt
   /// - **Returns**: `Widget` — LinearProgressIndicator + 텍스트
   /// - **호출**: _buildDeviceStatusCard()
-  Widget _buildStorageBar(Map<String, dynamic> device) {
+  Widget _buildStorageBar(Map<String, dynamic> device, ColorScheme cs, AppColorExt ext) {
     final total = (device['storageTotal'] as num).toDouble();
     final available = (device['storageAvailable'] as num).toDouble();
-    final photoCount = (device['photoCount'] as num?)?.toInt() ?? 0;
     final used = total - available;
     final ratio = total > 0 ? used / total : 0.0;
 
@@ -613,24 +692,36 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
       return '${bytes.toInt()}B';
     }
 
-    final color = ratio > 0.9 ? Colors.red : ratio > 0.75 ? Colors.orange : Colors.blue;
+    final color = ratio > 0.9
+        ? cs.error
+        : ratio > 0.75
+            ? ext.warning
+            : cs.primary;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('저장 공간', style: TextStyle(fontSize: 13, color: ext.textSecondary)),
+            Text('${(ratio * 100).toInt()}%',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: color)),
+          ],
+        ),
+        const SizedBox(height: 6),
         ClipRRect(
-          borderRadius: BorderRadius.circular(2),
+          borderRadius: BorderRadius.circular(3),
           child: LinearProgressIndicator(
             value: ratio,
-            backgroundColor: Colors.grey[700],
             color: color,
-            minHeight: 4,
+            minHeight: 6,
           ),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: 6),
         Text(
-          '${formatSize(used)} / ${formatSize(total)} 사용 · 사진 $photoCount장',
-          style: const TextStyle(color: Colors.white38, fontSize: 12),
+          '${formatSize(used)} / ${formatSize(total)}',
+          style: TextStyle(color: ext.textSecondary, fontSize: 12),
         ),
       ],
     );
@@ -650,37 +741,42 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     final canMonitor = _isOnline; // 통화 중에도 모니터링 가능 (1:N)
     final callLabel = _isInCall ? '통화 중' : '영상통화';
 
-    return Wrap(
-      spacing: 12,
-      runSpacing: 12,
+    return Column(
       children: [
-        _actionButton(
-          icon: Icons.videocam,
-          label: callLabel,
-          color: canCall ? Colors.green : Colors.grey[700]!,
-          guard: _callGuard,
-          onTap: canCall ? _callDevice : null,
+        Row(
+          children: [
+            Expanded(child: _actionButton(
+              icon: Icons.videocam,
+              label: callLabel,
+              guard: _callGuard,
+              onTap: canCall ? _callDevice : null,
+            )),
+            const SizedBox(width: 12),
+            Expanded(child: _actionButton(
+              icon: Icons.remove_red_eye,
+              label: '모니터링',
+              guard: _monitorGuard,
+              onTap: canMonitor ? _monitorDevice : null,
+            )),
+          ],
         ),
-        _actionButton(
-          icon: Icons.camera_outdoor,
-          label: '모니터링',
-          color: canMonitor ? Colors.orange : Colors.grey[700]!,
-          guard: _monitorGuard,
-          onTap: canMonitor ? _monitorDevice : null,
-        ),
-        _actionButton(
-          icon: Icons.photo_library,
-          label: '사진 보내기',
-          color: Colors.blue,
-          guard: _photoGuard,
-          onTap: _openPhotos,
-        ),
-        _actionButton(
-          icon: Icons.movie,
-          label: '영상 알림',
-          color: Colors.purple,
-          guard: _reminderGuard,
-          onTap: _openVideoReminder,
+        const SizedBox(height: 12),
+        Row(
+          children: [
+            Expanded(child: _actionButton(
+              icon: Icons.photo_library,
+              label: '사진 보내기',
+              guard: _photoGuard,
+              onTap: _openPhotos,
+            )),
+            const SizedBox(width: 12),
+            Expanded(child: _actionButton(
+              icon: Icons.movie_creation_outlined,
+              label: '영상 알림',
+              guard: _reminderGuard,
+              onTap: _openVideoReminder,
+            )),
+          ],
         ),
       ],
     );
@@ -693,21 +789,28 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
   /// - **Params**:
   ///   - [icon] — 버튼 아이콘
   ///   - [label] — 버튼 라벨 텍스트
-  ///   - [color] — 활성 상태 색상
   ///   - [onTap] — 탭 콜백 (null이면 비활성)
-  /// - **Returns**: `Widget` — 100px 너비의 액션 버튼 Container
+  /// - **Returns**: `Widget` — 2×2 그리드에서 Expanded 로 쓰이는 액션 카드
   /// - **호출**: _buildActionButtons()
   Widget _actionButton({
     required IconData icon,
     required String label,
-    required Color color,
     required TapGuard guard,
     Future<void> Function()? onTap,
   }) {
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
+
     return ValueListenableBuilder<bool>(
       valueListenable: guard.isBusy,
       builder: (context, busy, _) {
         final isDisabled = onTap == null || busy;
+        final fg = isDisabled ? ext.textSecondary : cs.primary;
+        final bg = isDisabled ? cs.surface : cs.primary.withValues(alpha: 0.12);
+        final border = isDisabled
+            ? ext.textSecondary.withValues(alpha: 0.2)
+            : cs.primary.withValues(alpha: 0.4);
+
         return PressScale(
           onTap: isDisabled
               ? null
@@ -716,27 +819,23 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
                   guard.run(onTap);
                 },
           child: Container(
-            width: 100,
-            padding: const EdgeInsets.symmetric(vertical: 16),
+            padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 10),
             decoration: BoxDecoration(
-              color: isDisabled
-                  ? Colors.grey[900]
-                  : color.withValues(alpha: 0.15),
+              color: bg,
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(
-                color: isDisabled ? Colors.grey[800]! : color.withValues(alpha: 0.4),
-              ),
+              border: Border.all(color: border),
             ),
             child: Column(
+              mainAxisSize: MainAxisSize.min,
               children: [
-                Icon(icon,
-                    color: isDisabled ? Colors.grey[600] : color, size: 28),
+                Icon(icon, color: fg, size: 24),
                 const SizedBox(height: 6),
                 Text(
                   label,
                   style: TextStyle(
-                    color: isDisabled ? Colors.grey[600] : Colors.white,
-                    fontSize: 12,
+                    color: isDisabled ? ext.textSecondary : null,
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
                   ),
                 ),
               ],
@@ -767,15 +866,23 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
-            const Text(
+            Text(
               '최근 보낸 사진',
-              style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                color: Theme.of(context).extension<AppColorExt>()!.textSecondary,
+                fontSize: 14,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             GestureDetector(
               onTap: _openPhotos,
-              child: const Text(
+              child: Text(
                 '더보기',
-                style: TextStyle(color: Colors.blue, fontSize: 13),
+                style: TextStyle(
+                  color: Theme.of(context).colorScheme.primary,
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                ),
               ),
             ),
           ],
@@ -791,6 +898,8 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
               final thumbUrl = photo['thumbUrl'] as String? ?? '';
               if (thumbUrl.isEmpty) return const SizedBox.shrink();
 
+              final surface = Theme.of(context).colorScheme.surface;
+              final iconColor = Theme.of(context).extension<AppColorExt>()!.textSecondary;
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: GestureDetector(
@@ -805,14 +914,14 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
                       placeholder: (_, _) => Container(
                         width: 80,
                         height: 80,
-                        color: Colors.grey[800],
+                        color: surface,
                         child: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
                       ),
                       errorWidget: (_, _, _) => Container(
                         width: 80,
                         height: 80,
-                        color: Colors.grey[800],
-                        child: const Icon(Icons.broken_image, color: Colors.grey),
+                        color: surface,
+                        child: Icon(Icons.broken_image, color: iconColor),
                       ),
                     ),
                   ),
@@ -825,35 +934,37 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
     );
   }
 
-  /// 가족 멤버 섹션 — Chip 목록 (이름 + 역할) (`Widget Builder`)
+  /// 가족 멤버 섹션 — Chip 목록 (이름) (`Widget Builder`)
   ///
-  /// 시니어 역할이면 '(시니어)' 접미어 표시.
+  /// 멤버는 Family 앱 사용자(자녀)만. 시니어는 /families/members에 포함 안 됨.
   ///
   /// - **Returns**: `Widget` — 제목 + Wrap 레이아웃의 Chip 목록
   /// - **호출**: build() (_members가 비어있지 않을 때)
   Widget _buildMembersSection() {
+    final cs = Theme.of(context).colorScheme;
+    final ext = Theme.of(context).extension<AppColorExt>()!;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
+        Text(
           '가족 멤버',
-          style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: FontWeight.bold),
+          style: TextStyle(
+            color: ext.textSecondary,
+            fontSize: 14,
+            fontWeight: FontWeight.bold,
+          ),
         ),
         const SizedBox(height: 8),
         Wrap(
-          spacing: 12,
+          spacing: 8,
           runSpacing: 8,
           children: _members.map((m) {
             final name = (m['name'] ?? '알 수 없음') as String;
-            final role = (m['role'] ?? '') as String;
             return Chip(
-              avatar: const Icon(Icons.person, size: 18, color: Colors.white70),
-              label: Text(
-                role == 'senior' ? '$name (시니어)' : name,
-                style: const TextStyle(color: Colors.white, fontSize: 13),
-              ),
-              backgroundColor: Colors.grey[800],
-              side: BorderSide.none,
+              avatar: Icon(Icons.person_outline, size: 16, color: cs.primary),
+              label: Text(name, style: const TextStyle(fontSize: 13)),
+              side: BorderSide(color: cs.primary.withValues(alpha: 0.35)),
+              backgroundColor: Colors.transparent,
             );
           }).toList(),
         ),

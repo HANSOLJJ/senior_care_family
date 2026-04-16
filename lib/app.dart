@@ -5,6 +5,8 @@ import 'package:firebase_database/firebase_database.dart';
 import 'services/connectivity_service.dart';
 import 'services/family_service.dart';
 import 'services/pairing_helper.dart';
+import 'theme/app_theme.dart';
+import 'theme/theme_controller.dart';
 import 'widgets/offline_overlay.dart';
 import 'screens/login_screen.dart';
 import 'screens/pairing_screen.dart';
@@ -87,33 +89,36 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
   ///   - snapshot.data != null → _PairingGate (로그인됨)
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: navigatorKey,
-      title: 'Senior Care Family',
-      debugShowCheckedModeBanner: false,
-      theme: ThemeData.dark(),
-      builder: (context, child) => OfflineOverlay(child: child ?? const SizedBox()),
-      home: StreamBuilder<User?>(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snapshot) {
-          // 로딩 중
-          if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Scaffold(
-              backgroundColor: Colors.black,
-              body: Center(
-                child: CircularProgressIndicator(color: Colors.white),
-              ),
-            );
-          }
+    return ValueListenableBuilder(
+      valueListenable: ThemeController.current,
+      builder: (context, preset, _) => MaterialApp(
+        navigatorKey: navigatorKey,
+        title: 'Senior Care Family',
+        debugShowCheckedModeBanner: false,
+        theme: AppTheme.build(preset),
+        builder: (context, child) => OfflineOverlay(child: child ?? const SizedBox()),
+        home: StreamBuilder<User?>(
+          stream: FirebaseAuth.instance.authStateChanges(),
+          builder: (context, snapshot) {
+            // 로딩 중
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Scaffold(
+                backgroundColor: Colors.black,
+                body: Center(
+                  child: CircularProgressIndicator(color: Colors.white),
+                ),
+              );
+            }
 
-          // 미로그인 → 로그인 화면
-          if (snapshot.data == null) {
-            return const LoginScreen();
-          }
+            // 미로그인 → 로그인 화면
+            if (snapshot.data == null) {
+              return const LoginScreen();
+            }
 
-          // 로그인됨 → 페어링 상태 확인
-          return const _PairingGate();
-        },
+            // 로그인됨 → 페어링 상태 확인
+            return const _PairingGate();
+          },
+        ),
       ),
     );
   }
@@ -203,6 +208,15 @@ class _PairingGateState extends State<_PairingGate> {
     try {
       final ids = await _familyService.getMyFamilyIds();
       if (mounted) {
+        // 페어링 직후 이름 설정 다이얼로그를 DeviceListScreen 렌더 전에 실행
+        // (렌더 후 실행하면 _loadFamilyNames/_loadMembers가 먼저 돌아 빈 값 표시됨)
+        if (_pendingFamilyId != null) {
+          final fid = _pendingFamilyId!;
+          _pendingFamilyId = null;
+          await PairingHelper.onPairingComplete(context, fid);
+        }
+
+        if (!mounted) return;
         setState(() {
           _familyIds = ids;
           _loading = false;
@@ -210,15 +224,6 @@ class _PairingGateState extends State<_PairingGate> {
         // 모든 가족 그룹의 멤버십 실시간 감시
         for (final id in ids) {
           _watchMembership(id);
-        }
-        // 페어링 직후 이름 설정 다이얼로그
-        if (_pendingFamilyId != null) {
-          final fid = _pendingFamilyId!;
-          _pendingFamilyId = null;
-          WidgetsBinding.instance.addPostFrameCallback((_) async {
-            if (!mounted) return;
-            await PairingHelper.onPairingComplete(context, fid);
-          });
         }
       }
     } catch (e) {
