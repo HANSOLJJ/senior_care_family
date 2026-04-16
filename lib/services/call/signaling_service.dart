@@ -279,14 +279,30 @@ class SignalingService {
     print('시그널링: 통화 종료 callId=$callId');
   }
 
-  /// (`Method`, async) 통화 데이터 삭제 (종료 후 정리)
+  /// (`Method`, async) 통화 데이터 삭제 (지연 fire-and-forget)
+  ///
+  /// `endCall` 이 `status="ended"` 를 쓴 뒤 즉시 노드를 지우면,
+  /// Senior `MonitoringPeer` 의 status 리스너가 "ended" 를 받기 전에
+  /// 노드가 사라져 버려서 (status=null 로 관측) dispose 되지 않고 좀비가 됨.
+  /// 그 결과 다음 call/monitor 요청이 `remoteBusy` 로 거절되는 버그가 발생.
+  ///
+  /// → 10 초 지연 후 remove 를 실행하여 Senior 가 안정적으로 "ended" 를 수신.
+  /// 호출자는 즉시 반환받고, 실제 remove 는 백그라운드에서 수행.
+  /// Family 앱이 10 초 내 종료되면 노드가 남지만 Cloud Function
+  /// `cleanupOrphanedData` (매일 3시) 가 정리.
   ///
   /// - **Params**:
   ///   - [callId] — 삭제할 통화 ID
-  /// - **Side Effects**: RTDB `/calls/{callId}` 노드 삭제
-  /// - **호출**: WebRtcService.hangUp (endCall 후 2초 딜레이)
+  /// - **Side Effects**: 10 초 후 RTDB `/calls/{callId}` 노드 삭제 (백그라운드)
+  /// - **호출**: WebRtcService.hangUp, orphan cleanup 경로
   Future<void> cleanupCall(String callId) async {
-    await _db.child('calls/$callId').remove();
+    Future.delayed(const Duration(seconds: 10), () async {
+      try {
+        await _db.child('calls/$callId').remove();
+      } catch (e) {
+        print('시그널링: cleanupCall 지연 remove 실패 (무시) $e');
+      }
+    });
   }
 
   // ─── 모니터링 → 통화 전환 ───

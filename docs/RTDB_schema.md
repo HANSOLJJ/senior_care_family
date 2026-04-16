@@ -63,7 +63,13 @@ Firebase RTDB
 │   ├── targetDeviceId: string                  # 수신 기기 ID (Senior)
 │   ├── targetFamilyId: string                  # 수신 가족 ID (Security Rules용)
 │   ├── callType: "call" | "monitor"            # call=양방향, monitor=일방향 CCTV
-│   ├── status: "ringing"|"connected"|"ended"   # 통화 상태
+│   ├── status: "ringing"|"answered"|"connected"|"ended"
+│   │                                           # ringing: Family 가 call 생성 시 초기값 (Family writer)
+│   │                                           # answered: Senior 가 sendAnswer 시 덮어씀 (Senior writer)
+│   │                                           # connected: Family 가 sendAnswer 시 덮어씀 (Family 가 receiver 일 때만 — 현재 미사용)
+│   │                                           # ended: Family 가 hangUp 시 덮어씀 (Family writer)
+│   │                                           # ⚠️ LWW 주의: 빠른 hangUp 시나리오에서 Senior 의 answered 가 Family 의 ended 를 뒤늦게 덮어쓸 수 있음.
+│   │                                           #    Senior 는 sendAnswer 전에 현재 status 확인 필요 (ended 면 answered 쓰지 않음).
 │   ├── endReason: string | null                # "normal"/"remoteBusy"/"capacityExceeded"/"otherCallStarted"
 │   ├── seniorAccepted: boolean | null           # Senior 수락 여부 (call 타입)
 │   ├── createdAt: timestamp
@@ -79,9 +85,10 @@ Firebase RTDB
 │   ├── iceRestartOffer: { sdp, type } | null   # ICE restart offer (Family → Senior)
 │   └── iceRestartAnswer: { sdp, type } | null  # ICE restart answer (Senior → Family)
 │
-│   Writer: Family (offer/candidates/upgradeRequest/renegotiateOffer/iceRestartOffer),
-│           Senior (answer/candidates/seniorAccepted/renegotiateAnswer/iceRestartAnswer/endReason)
-│   정리: 통화 종료 후 Family가 2초 뒤 삭제
+│   Writer: Family (offer/candidates/upgradeRequest/renegotiateOffer/iceRestartOffer/status=ringing|ended),
+│           Senior (answer/candidates/seniorAccepted/renegotiateAnswer/iceRestartAnswer/endReason/status=answered)
+│   정리: 통화 종료 후 Family 가 10초 지연 후 삭제 (Senior 가 status=ended 또는 노드 삭제로 dispose 할 시간 확보).
+│         10초 내 Family 앱 종료 시 고아 노드 남음 → cleanupOrphanedData CF 가 매일 정리.
 │
 ├── /pairingCodes/{code}: familyId              # 페어링 코드 → 가족 ID 역조회
 │

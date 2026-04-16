@@ -1057,13 +1057,14 @@ class WebRtcService {
       _fsm.to(CallPhase.terminated, reason: 'cleanup_done');
       // RTDB 정리는 best-effort background — 실패해도 UI 영향 없음.
       // signaling_service 쪽 writeOrTimeout / 노드 존재 체크로 orphan 방어됨.
+      // cleanupCall 은 내부에서 10초 fire-and-forget 지연을 수행하여
+      // Senior 가 status="ended" 를 안정적으로 수신할 시간을 확보.
       () async {
         try {
           await _signaling.endCall(cid);
         } catch (e) {
           print('시그널링: endCall 실패 (무시) $e');
         }
-        await Future.delayed(const Duration(seconds: 2));
         try {
           await _signaling.cleanupCall(cid);
         } catch (e) {

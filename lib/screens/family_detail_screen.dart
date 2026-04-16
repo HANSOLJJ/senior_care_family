@@ -138,11 +138,15 @@ class _FamilyDetailScreenState extends State<FamilyDetailScreen>
   /// - **호출**: _buildDeviceStatusCard, _buildActionButtons
   bool get _isOnline => PresenceUtil.isOnlineFromMap(_primaryDevice);
 
-  /// 현재 통화 중 여부 (`Getter`)
+  /// 현재 "영상통화 중" 여부 (`Getter`)
   ///
-  /// - **Returns**: `bool` — callStatus.active가 true인지
+  /// 1:N × 1:1 정책: 여러 Family 가 monitor 는 동시 가능하지만, call 은 1개만.
+  /// 따라서 type='call' 인 경우에만 새 call 을 막음.
+  /// type='monitor' 는 새 call 로 displace 가능하므로 막지 않음.
+  /// - **Returns**: `bool` — callStatus.active && type=='call'
   /// - **호출**: _buildDeviceStatusCard, _buildActionButtons
-  bool get _isInCall => _callStatus?['active'] == true;
+  bool get _isInCall =>
+      _callStatus?['active'] == true && _callStatus?['type'] == 'call';
 
   // ─── 라이프사이클 ───
 
