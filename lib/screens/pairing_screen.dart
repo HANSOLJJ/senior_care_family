@@ -214,11 +214,11 @@ class _PairingScreenState extends State<PairingScreen> {
                     child: ElevatedButton(
                       onPressed: _loading ? null : () => _submitCode(),
                       child: _loading
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 24,
                               height: 24,
                               child: CircularProgressIndicator(
-                                color: Colors.black,
+                                color: Theme.of(context).colorScheme.onPrimary,
                                 strokeWidth: 2,
                               ),
                             )

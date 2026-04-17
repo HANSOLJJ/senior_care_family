@@ -211,7 +211,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: Colors.white.withValues(alpha: 0.2),
+                color: cs.onSurface.withValues(alpha: 0.2),
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -461,7 +461,7 @@ class _PhotoUploadScreenState extends State<PhotoUploadScreen> with SafeStateMix
           icon: const Icon(Icons.add_photo_alternate),
           label: const Text('사진 보내기'),
           backgroundColor: _uploading ? ext.textSecondary : cs.primary,
-          foregroundColor: Colors.black,
+          foregroundColor: cs.onPrimary,
         ),
       ),
     );

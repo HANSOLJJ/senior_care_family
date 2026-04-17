@@ -488,10 +488,10 @@ class _ReminderEditScreenState extends State<ReminderEditScreen> with SafeStateM
               height: 216,
               child: CupertinoTheme(
                 data: CupertinoThemeData(
-                  brightness: Brightness.dark,
+                  brightness: Theme.of(context).brightness,
                   textTheme: CupertinoTextThemeData(
-                    dateTimePickerTextStyle: const TextStyle(
-                      color: Colors.white,
+                    dateTimePickerTextStyle: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurface,
                       fontSize: 22,
                       fontFamily: 'Pretendard',
                     ),

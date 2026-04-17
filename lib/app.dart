@@ -90,22 +90,23 @@ class _SeniorCareFamilyState extends State<SeniorCareFamily> {
   @override
   Widget build(BuildContext context) {
     return ValueListenableBuilder(
-      valueListenable: ThemeController.current,
-      builder: (context, preset, _) => MaterialApp(
+      valueListenable: ThemeController.currentHue,
+      builder: (context, hue, _) => MaterialApp(
         navigatorKey: navigatorKey,
         title: 'Senior Care Family',
         debugShowCheckedModeBanner: false,
-        theme: AppTheme.build(preset),
+        theme: AppTheme.build(hue.light),
+        darkTheme: AppTheme.build(hue.dark),
+        themeMode: ThemeMode.system,
         builder: (context, child) => OfflineOverlay(child: child ?? const SizedBox()),
         home: StreamBuilder<User?>(
           stream: FirebaseAuth.instance.authStateChanges(),
           builder: (context, snapshot) {
-            // 로딩 중
+            // 로딩 중 (배경/스피너 색상은 테마 자동 적용)
             if (snapshot.connectionState == ConnectionState.waiting) {
               return const Scaffold(
-                backgroundColor: Colors.black,
                 body: Center(
-                  child: CircularProgressIndicator(color: Colors.white),
+                  child: CircularProgressIndicator(),
                 ),
               );
             }
@@ -310,8 +311,7 @@ class _PairingGateState extends State<_PairingGate> {
   Widget build(BuildContext context) {
     if (_loading) {
       return const Scaffold(
-        backgroundColor: Colors.black,
-        body: Center(child: CircularProgressIndicator(color: Colors.white)),
+        body: Center(child: CircularProgressIndicator()),
       );
     }
 
