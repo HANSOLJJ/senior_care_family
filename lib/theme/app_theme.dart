@@ -112,8 +112,9 @@ class AppTheme {
       ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: p.snackBarBackground,
-        contentTextStyle: TextStyle(
-          color: isDark ? Colors.white : Colors.white,
+        // snackBarBackground 는 light/dark 모두 어두운 계열 → 텍스트 흰색 고정
+        contentTextStyle: const TextStyle(
+          color: Colors.white,
           fontFamily: 'Pretendard',
           fontSize: 14,
         ),

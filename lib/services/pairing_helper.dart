@@ -62,21 +62,12 @@ class PairingHelper {
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('가족 이름 지정', style: TextStyle(color: Colors.white)),
+        title: const Text('가족 이름 지정'),
         content: TextField(
           controller: controller,
           autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
+          decoration: const InputDecoration(
             hintText: '예: 부모님, 장인어른',
-            hintStyle: TextStyle(color: Colors.grey[600]),
-            filled: true,
-            fillColor: Colors.grey[800],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
           ),
           onSubmitted: (v) => Navigator.pop(dialogContext, v.trim()),
         ),
@@ -123,21 +114,12 @@ class PairingHelper {
       context: context,
       barrierDismissible: false,
       builder: (dialogContext) => AlertDialog(
-        backgroundColor: Colors.grey[900],
-        title: const Text('내 이름 설정', style: TextStyle(color: Colors.white)),
+        title: const Text('내 이름 설정'),
         content: TextField(
           controller: controller,
           autofocus: true,
-          style: const TextStyle(color: Colors.white),
-          decoration: InputDecoration(
+          decoration: const InputDecoration(
             hintText: '예: 아들, 딸, 홍길동',
-            hintStyle: TextStyle(color: Colors.grey[600]),
-            filled: true,
-            fillColor: Colors.grey[800],
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: BorderSide.none,
-            ),
           ),
           onSubmitted: (v) => Navigator.pop(dialogContext, v.trim()),
         ),
