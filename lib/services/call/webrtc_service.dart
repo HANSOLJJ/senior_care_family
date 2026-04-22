@@ -508,7 +508,26 @@ class WebRtcService {
       );
     } catch (e) {
       print('WebRTC: ICE restart 실패: $e');
-      _iceRestartInProgress = false; // 다음 DISCONNECTED 때 재시도 가능
+      _iceRestartInProgress = false;
+      // NetworkException (오프라인으로 offer 전송 실패) 시
+      // PC 가 FAILED 로 자연 전환될 때까지 기다리지 않고 직접 재시도 타이머 예약.
+      // WebRTC 내부 DISCONNECTED→FAILED 타이머는 조건부이고 언제 발화할지 보장 안 됨 →
+      // PC 가 계속 DISCONNECTED 로 머물면 _triggerIceRestart 재진입이 없어
+      // flap window 체크(60s 상한)조차 발화 못 하는 구멍.
+      // 10초 후 재진입해서 flap window/attempts 한도 체크가 도달하도록 보장.
+      if (e is NetworkException) {
+        _iceRestartAnswerTimer?.cancel();
+        _iceRestartAnswerTimer = Timer(
+          const Duration(milliseconds: _iceRestartAnswerTimeoutMs),
+          () {
+            final state = _peerConnection?.connectionState;
+            if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+                state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+              _triggerIceRestart();
+            }
+          },
+        );
+      }
     }
   }
 

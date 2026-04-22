@@ -382,12 +382,18 @@ class SignalingService {
   /// - **호출**: WebRtcService._triggerIceRestart
   Future<void> sendIceRestartOffer(String callId, Map<String, dynamic> offer) async {
     // ICE restart 는 오프라인 상태에서 작동해야 하므로 status 체크 안 함.
-    // writeOrTimeout + onTimeoutCleanup 으로 orphan 방어.
+    // onTimeoutCleanup 은 쓰지 않음 — 오프라인 동안 큐잉된 set(offer) 가
+    // 복구 시 flush 되어 Senior 에 도달하는 것이 복구 경로이기 때문.
+    // remove() 를 cleanup 으로 넣으면 set 과 race 를 유발하고 throw 시점도
+    // 7~10초 밀림 (onTimeoutCleanup 자체가 offline 큐에 hang).
+    // stale offer 노드 정리는:
+    //   - 정상 복구: Senior sendIceRestartAnswer 가 answer 쓰기 전 offer 선제 삭제
+    //   - 실패 종결: hangUp → cleanupCall 이 calls/{cid} 통째 삭제
+    //   - 앱 크래시: Family onDisconnect 가 calls/{cid} 통째 삭제
     await writeOrTimeout(
       () => _db.child('calls/$callId/iceRestartOffer').set(offer),
       label: 'ICE restart offer',
       timeout: const Duration(seconds: 3),
-      onTimeoutCleanup: () => _db.child('calls/$callId/iceRestartOffer').remove(),
     );
     print('시그널링: ICE restart offer 전송 callId=$callId');
   }
