@@ -255,6 +255,60 @@ RUN 5 에서는 4회차 재시도 후 45초 시점에 `KEYCODE_BACK` (뒤로가�
 
 ---
 
+## S6 — restart 도중 사용자 수동 종료
+
+**상태**: ✅ PASS (2026-04-22, 자동 테스트)
+
+### 배경 — OfflineOverlay 탭 차단 버그 (수정 완료)
+
+수정 전: `OfflineOverlay` 의 `Material` 위젯이 포인터 이벤트를 전부 흡수 → Wi-Fi off 후 검은 오버레이가 뜨면 종료 버튼 탭 불가. 동시에 MonitoringScreen reconnecting 오버레이 + 전역 OfflineOverlay 가 동시에 쌓이는 UX 중복 발생.
+
+**수정** (`CallPresence` + `AnimatedBuilder` + `Listenable.merge`):
+- `lib/services/call/call_presence.dart` (신규): 통화 활성 상태 `ValueNotifier<bool>`
+- `lib/screens/monitoring_screen.dart`: `initState` 에서 `inCall = true`, `dispose` 시작에서 `false`
+- `lib/widgets/offline_overlay.dart`: `!online && !inCall` 일 때만 오버레이 표시 → 통화 중에는 suppression
+
+### S6 자동 테스트 (`scripts/s6_auto.sh`)
+
+```text
+[S6] baseline=658 lines
+[S6] Wi-Fi off @ 16:44:13.551
+[S6] ice_restart_start @ 16:44:23.771  ← 10.2s 만에 감지
+[S6] Tap 종료 @ 16:44:24.109
+[S6] Wi-Fi on @ 16:44:25.760
+```
+
+### S6 타임라인
+
+```text
+시각(기기)     Family                                              Senior
+──────────────────────────────────────────────────────────────────────────────────────
+16:44:13       Wi-Fi off (스크립트)
+16:44:19.529                                                       CONNECTED → RESTARTING
+                                                                   stopPeer 예약 (+15s)
+16:44:21.116   FSM connected → reconnecting (ice_restart_start)
+16:44:22.036   ★ 종료 버튼 탭 도달 → FSM reconnecting → terminating (hangup:userHangup)
+16:44:22.129   FSM terminating → terminated (cleanup_done)         ← 93ms 만에 종결
+──────────────────────────────────────────────────────────────────────────────────────
+16:44:28.924                                                       ★ 노드 삭제 감지 — RESTARTING
+                                                                   중이므로 STOP_DELAY 타이머에 위임 (B fix)
+16:44:29.611                                                       상대방 종료 감지 (status=ended)
+                                                                   RESTARTING → ENDED
+```
+
+### S6 검증 결과
+
+| 항목 | 기대 | 실제 | 통과 |
+|---|---|---|---|
+| `ice_restart_start` 중 탭 도달 | ✓ | OfflineOverlay suppressed → 탭 통과 | ✅ |
+| `hangup:userHangup` reason | ✓ | 정확 | ✅ |
+| FSM `reconnecting → terminating → terminated` | ✓ | 93ms 완료 | ✅ |
+| `_iceRestartAnswerTimer` 오발 없음 | ✓ | hangup 후 타이머 fire 0건 | ✅ |
+| Senior B fix (노드 삭제 무시, STOP_DELAY 위임) | ✓ | "RESTARTING 중이므로 위임" 로그 확인 | ✅ |
+| Senior `status=ended` 수신 후 정상 종료 | ✓ | RESTARTING → ENDED | ✅ |
+
+---
+
 ## R1 — 좀비 peer 방지 (회귀)
 
 **상태**: 🔲 미진행

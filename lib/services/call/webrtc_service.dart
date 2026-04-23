@@ -362,11 +362,18 @@ class WebRtcService {
   // ─── PC 콜백 헬퍼 (4개 PC 생성 지점 공통) ───
 
   /// (`Callback`) 원격 트랙 수신 — `_remoteStream`/`remoteRenderer` 세팅
+  ///
+  /// CCTV 모니터링 (RecvOnly) 중에는 원격 오디오를 자동 mute — Senior 의 마이크 소음
+  /// / 스피커 하울링을 막고 AudioManager 의 IN_COMMUNICATION 볼륨 스트림 전환을 회피.
+  /// [upgradeToCall] 에서 양방향 통화로 전환 시 다시 enable.
   void _onTrack(RTCTrackEvent event) {
     print('WebRTC: 원격 트랙 수신 kind=${event.track.kind}');
     if (event.streams.isNotEmpty) {
       _remoteStream = event.streams[0];
       remoteRenderer.srcObject = _remoteStream;
+    }
+    if (event.track.kind == 'audio' && _isMonitoring) {
+      event.track.enabled = false;
     }
   }
 
@@ -916,6 +923,9 @@ class WebRtcService {
     if (_peerConnection == null || _callId == null) return;
     if (!_fsm.to(CallPhase.upgrading, reason: 'senior_accepted')) return;
     print('WebRTC: 모니터링 → 통화 전환');
+
+    // 모니터링 중 mute 시켰던 원격 오디오 track 재활성화
+    _remoteStream?.getAudioTracks().forEach((t) => t.enabled = true);
 
     // 로컬 미디어 획득 (startCall에서 이미 프리뷰 시작했으면 재사용)
     if (_localStream == null) {

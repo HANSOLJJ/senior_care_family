@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
+import '../services/call/call_presence.dart';
 import '../services/call/call_state_machine.dart';
 import '../services/call/signaling_service.dart';
 import '../services/call/webrtc_service.dart';
@@ -135,6 +136,9 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   @override
   void initState() {
     super.initState();
+    // 통화 활성 플래그 set — OfflineOverlay 가 통화 중에는 suppress 됨
+    // (MonitoringScreen 의 reconnecting 오버레이와 중복 방지 + 종료 버튼 탭 가능)
+    CallPresence.inCall.value = true;
     _webrtc = WebRtcService(_signaling);
     // FSM terminated 감지 — reason 기반으로 dialog/snackbar/pop 분기
     _webrtc.phase.addListener(_onPhaseChanged);
@@ -522,6 +526,8 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   /// - **호출**: Flutter 프레임워크 (위젯 소멸 시)
   @override
   void dispose() {
+    // 통화 활성 플래그 clear — OfflineOverlay 즉시 복귀 조건 만족
+    CallPresence.inCall.value = false;
     _hangUpGuard.dispose();
     _upgradeGuard.dispose();
     _phase1Timer?.cancel();
