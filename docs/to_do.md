@@ -42,6 +42,38 @@
 - [ ] 카메라/마이크 권한 자동 요청 (`pm clear` 후 첫 부팅)
 - [ ] 사진 갤러리 / 알림 목록 관리 메뉴 실기기 테스트
 
+### 1:N × 1:1 정책 회귀 테스트 실행
+
+2026-04-24 displace 정책 문서화 + §5 1:N 시나리오 (R/N/NX) 14종 정리 완료. 사용자 보유 2번째 Family 기기 연결 후 실측.
+
+**준비**:
+- [ ] Family B (2번째 기기) ADB 식별자 확인 후 [ICE_restart_test.md §2 테스트 환경](ICE_restart_test.md#2-테스트-환경) 에 기재
+
+**§4 회귀 (정책 핵심)**:
+- [ ] **R3** displace 절차 — Family A monitor → Family B call → A 다이얼로그/pop
+
+**§5.1 정책 신규 시나리오** (peer 독립성 + 대칭 + busy):
+- [ ] **R5** Family A 단독 Wi-Fi off → A ICE restart, B 영향 없음 (베이스 검증)
+- [ ] **R6** Senior Wi-Fi off → A/B 대칭 복구 or 대칭 iceFailed
+- [ ] **R7** Family A iceFailed → B monitor 유지, Senior `peers=1`
+- [ ] **R8** A call 중 → B call 발신 시 `remoteBusy` 다이얼로그
+
+**§5.2 1:1 시나리오의 1:N 변형** (1:N 에서 새 동작):
+- [ ] **N3** A 만 Wi-Fi → LTE 핸드오프 — Senior 가 LTE relay + Wi-Fi p2p 동시 보유 가능?
+- [ ] **N7** Senior 응답 지연 시 A·B 동시 timeout → multi-peer answer 처리 (직렬 vs 병렬)
+- [ ] **N11** A upgrade fail 후 monitor 잔존 → B 의 새 call 시 displace 정상 작동?
+
+**§5.3 1:N 고유 timing/overlap 케이스** (race):
+- [ ] **NX1** A grace 중 B 신규 합류 → A 복구 (Senior peer slot 손상 없음)
+- [ ] **NX2** A iceFailed 직후 재 monitor → B 진행 중 → callId 충돌 없음
+- [ ] **NX3** A·B 동시 Wi-Fi off → 병렬 ICE restart (Senior 처리 모델 검증)
+- [ ] **NX4** 4번째 monitor → `capacityExceeded` (4대 미보유 시 `MAX_PEERS` 임시 하향)
+- [ ] **NX5** A·B 동시 call 발신 race → 한쪽만 성공, 다른 쪽 명시적 거절
+
+**기록**:
+- [ ] 결과를 `docs/ICE_restart_test_result.md` 의 R/N/NX 섹션으로 기록
+- [ ] 관찰된 UX 이슈 (있으면) 별도 TODO 등록
+
 ---
 
 ## 중기 TODO (Phase 5–6 마무리)

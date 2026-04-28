@@ -163,7 +163,7 @@ MonitoringSession
 | `Family: webrtc_service.dart` | startMonitoring, upgradeToCall |
 | `Family: signaling_service.dart` | callType, renegotiation 시그널링 |
 | `Family: family_detail_screen.dart` | 모니터링/통화 버튼 |
-| `Senior: MonitoringSession.kt` | 다중 peer 관리 + 통화 전환 |
-| `Senior: MonitorCallActivity.kt` | 통화 전환 시 영상 UI |
-| `Senior: FaceDetectionService.kt` | 얼굴 감지 (VideoSink → ML Kit) |
-| `Senior: IncomingCallActivity.kt` | 기존 얼굴 인식 자동응답 (제거/이전 대상) |
+| `Senior: call/MonitoringSession.kt` | 다중 peer 관리 + 통화 전환 |
+| `Senior: call/CallActivity.kt` | 통화 전환 시 영상 UI |
+| `Senior: facedetection/FaceDetectionService.kt` | 얼굴 감지 (ML Kit) |
+| `Senior: facedetection/FaceDetectionVideoSink.kt` | WebRTC 프레임 → ML Kit 전달 |

@@ -279,7 +279,45 @@ sequenceDiagram
 | `remoteEnded` | 원격 status=ended | connected→terminating | 상대방이 종료 |
 | `remoteBusy` | Senior 다른 통화 중 | connecting→terminating | 통화 중 |
 | `capacityExceeded` | Senior MAX_PEERS 초과 | connecting→terminating | 모니터링 한도 초과 |
-| `otherCallStarted` | 모니터링 중 Senior가 call 시작 | connected→terminating | 다른 통화로 전환됨 |
+| `otherCallStarted` | 모니터링 중 Senior가 call 수락 → displace | connected→terminating | 모니터링이 종료되었습니다 |
+
+### 10-1. `otherCallStarted` 상세 (1:N displace 절차)
+
+**발생 조건**: Family B 가 영상통화 발신 → Senior 수락 (`setSeniorAccepted=true`) → `MonitoringSession.handleUpgradeRequest()` 끝에서 `displaceOtherMonitors()` 호출.
+
+**Senior 동작** (`MonitoringSession.kt:820-840`): 모든 `callType=="monitor"` peer 에 대해
+
+1. `SignalingClient.rejectCall(cid, EndReason.OTHER_CALL_STARTED)` → RTDB `/calls/{cidX}/{status="ended", endReason="otherCallStarted"}` write
+2. `stopPeer(cid, skipSignalingHangup=true, skipCallStatusUpdate=true)` → 로컬 peer cleanup
+
+**Family 동작** (displace 당한 monitor 측):
+
+1. `listenForCallEnd` → `_mapEndReason("otherCallStarted")` → `TerminateReason.endedByOtherCall`
+2. FSM: `connected/reconnecting → terminating (hangup:endedByOtherCall) → terminated (cleanup_done)`
+3. `MonitoringScreen._getDialogTexts(endedByOtherCall)` ([monitoring_screen.dart:395-399](../lib/screens/monitoring_screen.dart#L395-L399)) →
+   - 제목: "모니터링이 종료되었습니다"
+   - 본문: "가족이 영상통화를 시작하여 모니터링이 종료되었습니다."
+   - 재시도 버튼 없음 → 확인 시 pop
+
+**displace 직전** (Family B call 아직 `type='call'` 로 RTDB 쓰기 반영되는 짧은 순간): Family A 의 `_callStatusSub` 가 `callStatus.type=='call' && active` 감지 → `_callActiveByOther=true` → [monitoring_screen.dart:706](../lib/screens/monitoring_screen.dart#L706) "통화 전환" 버튼 숨김. 뒤이어 endReason 수신 → 다이얼로그.
+
+상세 시퀀스는 [§13 1:N × 1:1 정책 흐름](#13-1n--11-정책-흐름) 참조.
+
+### 10-2. `remoteBusy` 상세 (call 배타 정책)
+
+**발생 조건**: Senior 가 이미 `callType="call"` 로 통화 중 → 다른 Family 가 call 발신.
+
+**Senior 동작**: 새 call offer 도달 시 기존 call 존재 감지 → `rejectCall(..., REMOTE_BUSY)` → RTDB `endReason="remoteBusy"` write. 기존 call peer 는 영향 없음.
+
+**Family 동작** (새 call 발신자): `_mapEndReason("remoteBusy") → TerminateReason.remoteBusy` → 다이얼로그 "{Senior 이름}이(가) 통화 중입니다 / 다른 가족이 통화 중입니다. 잠시 후 다시 시도해주세요." → pop.
+
+### 10-3. `capacityExceeded` 상세 (MAX_PEERS=3)
+
+**발생 조건**: Senior 가 이미 monitor peer 3개 운영 중 → 4번째 Family 가 monitor 발신.
+
+**Senior 동작**: peers 카운터 3 초과 감지 → `rejectCall(..., CAPACITY_EXCEEDED)` → RTDB `endReason="capacityExceeded"` write.
+
+**Family 동작**: `_mapEndReason("capacityExceeded") → TerminateReason.capacityExceeded` → 다이얼로그 "모니터링 한도 초과" → pop.
 
 ---
 
@@ -322,3 +360,102 @@ sequenceDiagram
 | ICE restart 한도 | 5회 / 60s window | `_maxIceRestartAttempts` / `_maxFlapWindowMs` |
 | 종료 후 노드 정리 | 10s | `hangUp` (fire-and-forget) |
 | RTDB write timeout | 3s | `writeOrTimeout` (NetworkGuard) |
+| Senior monitor peer 상한 | 3 (`MAX_PEERS`) | Senior `MonitoringSession` |
+| Senior STOP_DELAY (RESTARTING 중) | 15s | Senior `MonitoringPeer` |
+
+---
+
+## 13. 1:N × 1:1 정책 흐름
+
+**정책 요약**:
+
+- Senior 1대에 여러 Family 가 **monitor 동시 가능** (최대 `MAX_PEERS=3`)
+- **Call 은 배타적** (1개만 허용). call 시작 시 기존 monitor 들은 `endReason="otherCallStarted"` 로 **자동 displace**
+- Call 중 다른 Family 의 call 시도 → `endReason="remoteBusy"` 로 거절
+- 4번째 Family 의 monitor 시도 → `endReason="capacityExceeded"` 로 거절
+
+### 13-1. displace 시퀀스 (Family A monitor 중 → Family B call)
+
+```mermaid
+%%{init: {'sequence': {'actorMargin':80, 'messageMargin':40, 'width':170}}}%%
+sequenceDiagram
+    autonumber
+    actor UA as Family A User
+    participant FA as Family A
+    participant R as RTDB
+    participant S as Senior
+    participant FB as Family B
+    actor UB as Family B User
+
+    Note over FA,S: Family A monitor CONNECTED
+    UB->>FB: 영상통화 버튼
+    FB->>R: createCall (callType=call, cidB)
+    R->>S: onChildAdded (cidB)
+    S->>R: answer, status=connected (cidB)
+    Note over S: Phase 2 — seniorAccepted 대기
+    UB->>S: (수락 화면 표시)
+    Note over S: Senior 사용자 수락
+    S->>R: seniorAccepted=true (cidB)
+    R->>FB: callStatus type=call, active=true
+    R->>FA: callStatus type=call, active=true
+    FA->>FA: _callActiveByOther=true → 전환 버튼 숨김
+    S->>S: handleUpgradeRequest (cidB)
+    S->>S: displaceOtherMonitors() — A peer 대상
+    S->>R: cidA: status=ended, endReason=otherCallStarted
+    S->>S: stopPeer(cidA, skipSignalingHangup=true)
+    R->>FA: listenForCallEnd (otherCallStarted)
+    FA->>FA: _mapEndReason → endedByOtherCall
+    FA->>FA: FSM connected → terminating → terminated
+    FA->>UA: 다이얼로그 "모니터링이 종료되었습니다"
+    UA->>FA: 확인 → pop
+    Note over FB,S: Family B 양방향 통화 유지
+```
+
+### 13-2. remoteBusy 시퀀스 (Family A call 중 → Family B call 시도)
+
+```mermaid
+%%{init: {'sequence': {'actorMargin':80, 'messageMargin':40, 'width':170}}}%%
+sequenceDiagram
+    autonumber
+    participant FA as Family A
+    participant S as Senior
+    participant R as RTDB
+    participant FB as Family B
+    actor UB as Family B User
+
+    Note over FA,S: Family A 영상통화 CONNECTED
+    UB->>FB: 영상통화 버튼
+    FB->>R: createCall (cidB, callType=call)
+    R->>S: onChildAdded (cidB)
+    S->>S: 기존 call peer 존재 감지
+    S->>R: cidB: status=ended, endReason=remoteBusy
+    R->>FB: listenForCallEnd
+    FB->>FB: _mapEndReason → remoteBusy
+    FB->>UB: "Senior 이(가) 통화 중입니다" 다이얼로그 → pop
+    Note over FA,S: Family A 세션 영향 없음
+```
+
+### 13-3. capacityExceeded 시퀀스 (4번째 monitor 시도)
+
+```text
+Senior peers 현재 상태: A(monitor) + B(monitor) + C(monitor) = 3
+   ↓
+Family D (4번째) 가 monitor 발신
+   ↓
+Senior: peers 카운터 3 ≥ MAX_PEERS → rejectCall(CAPACITY_EXCEEDED)
+   ↓
+Family D: endReason="capacityExceeded" 수신 → "모니터링 한도 초과" 다이얼로그 → pop
+```
+
+### 13-4. Family 측 UX 참조
+
+| 상황 | Family UX | 코드 경로 |
+|---|---|---|
+| Monitor 중 다른 Family call 시작 감지 | "통화 전환" 버튼 숨김 | [monitoring_screen.dart:156-170, 706](../lib/screens/monitoring_screen.dart#L156-L170) `_callActiveByOther` |
+| Monitor displace 당함 | 다이얼로그 + pop | [monitoring_screen.dart:395-399](../lib/screens/monitoring_screen.dart#L395-L399) `endedByOtherCall` |
+| Call 버튼 활성화 제어 | Senior call 중이면 비활성 | [family_detail_screen.dart:148-149, 744](../lib/screens/family_detail_screen.dart#L148-L149) `_isInCall = active && type=='call'` |
+| Monitor 버튼 활성화 | 언제나 (1:N) | [family_detail_screen.dart:745](../lib/screens/family_detail_screen.dart#L745) `canMonitor = _isOnline` |
+
+### 13-5. 관련 회귀 테스트
+
+실기기 실측 시나리오는 [ICE_restart_test.md §5 "1:N 환경 회귀 테스트" (R5~R8)](ICE_restart_test.md) 참조.

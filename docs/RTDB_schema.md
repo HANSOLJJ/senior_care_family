@@ -70,7 +70,9 @@ Firebase RTDB
 │   │                                           # ended: Family 가 hangUp 시 덮어씀 (Family writer)
 │   │                                           # ⚠️ LWW 주의: 빠른 hangUp 시나리오에서 Senior 의 answered 가 Family 의 ended 를 뒤늦게 덮어쓸 수 있음.
 │   │                                           #    Senior 는 sendAnswer 전에 현재 status 확인 필요 (ended 면 answered 쓰지 않음).
-│   ├── endReason: string | null                # "normal"/"remoteBusy"/"capacityExceeded"/"otherCallStarted"
+│   ├── endReason: string | null                # Senior writer: "normal" | "remoteBusy" | "capacityExceeded" | "otherCallStarted"
+│   │                                           # Family writer: "iceFailed" | "unreachable" | "noAcceptance" ...
+│   │                                           # 전체 매트릭스: docs/call-scenarios.md §10
 │   ├── seniorAccepted: boolean | null           # Senior 수락 여부 (call 타입)
 │   ├── createdAt: timestamp
 │   ├── offer: { sdp: string, type: string }    # SDP offer (Family → Senior)
@@ -89,6 +91,12 @@ Firebase RTDB
 │           Senior (answer/candidates/seniorAccepted/renegotiateAnswer/iceRestartAnswer/endReason/status=answered)
 │   정리: 통화 종료 후 Family 가 10초 지연 후 삭제 (Senior 가 status=ended 또는 노드 삭제로 dispose 할 시간 확보).
 │         10초 내 Family 앱 종료 시 고아 노드 남음 → cleanupOrphanedData CF 가 매일 정리.
+│
+│   1:N × 1:1 정책 (Senior 측 강제):
+│     - monitor N개 동시 허용 (상한 MAX_PEERS=3, 초과 시 endReason=capacityExceeded)
+│     - call 은 1개 배타 (기존 call 이 있으면 endReason=remoteBusy)
+│     - call 수락 시 기존 monitor peer 들 자동 displace (endReason=otherCallStarted)
+│     - 상세: docs/call-scenarios.md §13
 │
 ├── /pairingCodes/{code}: familyId              # 페어링 코드 → 가족 ID 역조회
 │

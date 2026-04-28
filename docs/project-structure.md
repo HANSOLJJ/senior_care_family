@@ -243,7 +243,7 @@ RTDB calls/{cid}/iceRestartOffer 에 SDP 기록 (signaling.sendIceRestartOffer)
 - CONNECTED **5초 안정 유지** 시 attempts/flapWindow 리셋
 - `_iceRestartInProgress` 가드로 중복 트리거 방지
 
-테스트 시트: [ICE_restart_test.md](ICE_restart_test.md)
+테스트 시트: [ICE_restart_test.md](ICE_restart_test.md) · 시퀀스 다이어그램: [call-scenarios.md §6-7](call-scenarios.md)
 
 ### 좀비 peer 방지 (cleanupCall 10초 지연)
 
@@ -251,6 +251,22 @@ RTDB calls/{cid}/iceRestartOffer 에 SDP 기록 (signaling.sendIceRestartOffer)
 즉시 삭제하면 Senior 가 status=ended 를 받기 전에 노드가 사라져 통화 종료 신호를 놓치고 zombie 상태로 남는 문제 (다음 발신 시 remoteBusy) 방지.
 
 병행으로 Senior `sendAnswer` 는 `runTransaction` 으로 `status==ended` 시 abort — Family 의 hangUp 이후 도착한 Senior answered 가 ended 를 LWW로 덮어쓰는 race 차단.
+
+### 1:N × 1:1 정책 (multi-Family)
+
+Senior 1대에 여러 Family 가 **monitor 동시 가능** (상한 `MAX_PEERS=3`), **call 은 1개 배타**. Senior 측 `MonitoringSession` 이 강제:
+
+- **Call 수락 시 기존 monitor 들 자동 displace** → `endReason="otherCallStarted"` → displace 당한 Family 는 "모니터링이 종료되었습니다" 다이얼로그 → pop
+- **Call 중 다른 call 시도** → `endReason="remoteBusy"` → "통화 중입니다" 다이얼로그
+- **4번째 monitor 시도** → `endReason="capacityExceeded"` → "모니터링 한도 초과" 다이얼로그
+
+Family 측 UX:
+
+- `family_detail_screen.dart:148` `_isInCall = active && type=='call'` → call 버튼 활성화 제어 (monitor 중이어도 다른 사람 call 가능)
+- `monitoring_screen.dart:156-170` `_callActiveByOther` → 다른 Family 의 call 감지 시 "통화 전환" 버튼 숨김
+- `monitoring_screen.dart:395-399` `endedByOtherCall` → displace 당한 시 다이얼로그 + pop
+
+상세 시퀀스: [call-scenarios.md §13](call-scenarios.md)
 
 ---
 
@@ -423,8 +439,9 @@ adb -s R3CR700SEKP logcat --pid=$(adb -s R3CR700SEKP shell pidof com.seniorcare.
 ```
 
 테스트 기기:
-- **SM-G991N** (Galaxy S21, `R3CR700SEKP`) → Family 앱
-- **SM-T500** (Galaxy Tab A7, `R9TT903QE5V`) → Senior 앱. **절대 Family 앱 설치 금지**
+- **SM-G991N** (Galaxy S21, `R3CR700SEKP`) → Family 앱 (주 테스트)
+- **Lenovo M10VSA2** (`KEP2024120921`) → Senior 앱. **절대 Family 앱 설치 금지** (기존 SM-T500 에서 교체)
+- 1:N 회귀 테스트용 Family B 기기는 `adb devices` 로 식별자 확정 후 사용
 
 ### iOS (Mac Mini SSH/Parsec)
 
@@ -484,7 +501,9 @@ firebase deploy --only functions
 ## 관련 문서
 
 - [RTDB_schema.md](RTDB_schema.md) — RTDB 전체 스키마
-- [ICE_restart_test.md](ICE_restart_test.md) — ICE Restart 테스트 시트
+- [call-scenarios.md](call-scenarios.md) — 통화/모니터링 FSM · 시퀀스 다이어그램 · 1:N × 1:1 정책 흐름
+- [ICE_restart_test.md](ICE_restart_test.md) — ICE Restart 테스트 시트 (S1~S17 + R1~R8 회귀)
+- [ICE_restart_test_result.md](ICE_restart_test_result.md) — ICE Restart 테스트 실측 결과
 - [datachannel-photo-transfer.md](datachannel-photo-transfer.md) — 미디어 전송 설계
 - [smart-frame-plan.md](smart-frame-plan.md) — 전체 구현 계획 (Phase 1~7)
 - [to_do.md](to_do.md) — 현재 TODO

@@ -396,6 +396,28 @@ async function doOrphanCleanup({ aggressive = false } = {}) {
     }
   }
 
+  // Step 7: 고아 calls 정리 (24시간 초과 + active 아님)
+  // - cutoff 24h: 정상 모니터링 (수십분~수시간) 절대 안 건드리기
+  // - status="answered" 보호: 활성 통화 절대 삭제 안 함 (혹시 24h+ 활성이면 비정상이지만 안전상 보호)
+  // - 일반 케이스: 양쪽 앱 종료 후 onDisconnect 가 못 발화한 좀비 노드 (전원 강제 차단 등)
+  try {
+    const callsSnap = await db.ref("calls").once("value");
+    const calls = callsSnap.val() || {};
+    const callsCutoff = now - 24 * 60 * 60 * 1000;
+    for (const [cid, data] of Object.entries(calls)) {
+      if (!data || typeof data !== "object") continue;
+      const createdAt = data.createdAt;
+      const status = data.status;
+      if (createdAt && createdAt < callsCutoff && status !== "answered") {
+        await db.ref(`calls/${cid}`).remove();
+        result.calls = (result.calls || 0) + 1;
+        console.log(`Step7: 고아 call 삭제: ${cid} (createdAt: ${new Date(createdAt).toISOString()}, status: ${status})`);
+      }
+    }
+  } catch (e) {
+    console.error("Step7 calls 정리 실패:", e.message);
+  }
+
   // Step 6: 고아 Storage 정리 (RTDB에 없는 familyId의 Storage 파일 삭제)
   try {
     const bucket = admin.storage().bucket("dcom-smart-frame.firebasestorage.app");

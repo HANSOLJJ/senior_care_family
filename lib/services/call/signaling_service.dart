@@ -419,39 +419,8 @@ class SignalingService {
 
   // ─── 정리 ───
 
-  /// (`Utility`, static, async) 앱 시작 시 잔존 통화 정리 (5분 이상 지난 통화 삭제)
-  ///
-  /// 비정상 종료 등으로 남아있는 오래된 통화 노드를 일괄 삭제.
-  /// - **Side Effects**: RTDB `/calls/` 하위 5분 초과 노드 삭제
-  /// - **호출**: 앱 초기화 시 (main.dart 또는 app.dart)
-  static Future<void> cleanupStaleCalls() async {
-    try {
-      final db = FirebaseDatabase.instance.ref();
-      final snapshot = await db.child('calls').get();
-      if (!snapshot.exists) return;
-
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final calls = snapshot.value as Map;
-      int cleaned = 0;
-
-      for (final entry in calls.entries) {
-        final data = entry.value as Map?;
-        if (data == null) continue;
-
-        final createdAt = data['createdAt'] as int?;
-        if (createdAt != null && (now - createdAt) > 5 * 60 * 1000) {
-          await db.child('calls/${entry.key}').remove();
-          cleaned++;
-        }
-      }
-
-      if (cleaned > 0) {
-        print('시그널링: 잔존 통화 $cleaned개 정리 완료');
-      }
-    } catch (e) {
-      print('시그널링: 잔존 통화 정리 실패: $e');
-    }
-  }
+  // 잔존 calls 정리는 CF `cleanupOrphanedData` (매일 3시) 의 Step 7 에서 처리.
+  // 과거 `cleanupStaleCalls` 는 호출자 부재 + 다른 사용자 활성 통화 잘못 삭제 위험으로 제거됨 (2026-04-28).
 
   /// (`Lifecycle`) 리소스 해제 — 수신 통화 감시 구독 취소
   ///

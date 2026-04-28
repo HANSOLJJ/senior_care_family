@@ -35,7 +35,7 @@ enum CallPhase {
 /// |---|---|
 /// | userHangup, remoteEnded, orphanCleaned | 즉시 pop |
 /// | unreachable, noAcceptance, iceFailed, networkOffline, remoteBusy, endedByOtherCall, capacityExceeded | 다이얼로그 → pop |
-/// | upgradeFailed | SnackBar 표시, 모니터링 유지 (pop 안 함) |
+/// | upgradeFailed | SnackBar 표시 + pop (hangUp 으로 PC 해제됨) |
 enum TerminateReason {
   /// 사용자 종료 버튼
   userHangup,

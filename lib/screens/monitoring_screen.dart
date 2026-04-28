@@ -307,7 +307,7 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
   /// - userHangup / remoteEnded / orphanCleaned → 즉시 pop
   /// - unreachable / noAcceptance → 다이얼로그 + 재시도 버튼 → 재시도 or pop
   /// - iceFailed / networkOffline / remoteBusy / endedByOtherCall / capacityExceeded → 다이얼로그 → pop
-  /// - upgradeFailed → SnackBar 만 (화면 유지)
+  /// - upgradeFailed → SnackBar 표시 후 pop (PC 이미 해제됨)
   Future<void> _handleTerminated(TerminateReason reason) async {
     if (_dialogShown || !mounted) return;
 
@@ -319,10 +319,12 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         Navigator.of(context).pop();
         return;
       case TerminateReason.upgradeFailed:
-        // SnackBar 만 — 화면 유지 (모니터링 계속)
+        // upgradeToCall 내부 NetworkException → hangUp(upgradeFailed) 경로.
+        // PC 가 이미 해제됐으므로 화면 유지 불가 → SnackBar 후 pop.
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('통화 전환에 실패했습니다')),
         );
+        Navigator.of(context).pop();
         return;
       default:
         break;

@@ -116,6 +116,13 @@ class WebRtcService {
   /// ICE restart answer 감시 구독 (`iceRestartAnswer`)
   StreamSubscription? _iceRestartAnswerSub;
 
+  /// Senior 측 server-side onDisconnect (`endReason="seniorDisconnect"`) 수신 시
+  /// 즉시 hangUp 안 하고 grace 동안 ICE restart 자연 진입 + Senior 복구 대기.
+  /// PC CONNECTED 복귀 시 cancel, 만료 시 `hangUp(remoteEnded)`.
+  /// 배경: kep_wifi_suspend_presence.md §"연관 이슈 1" — KEP MTK WiFi 자발적 2~3s drop.
+  Timer? _seniorDisconnectGraceTimer;
+  static const _seniorDisconnectGraceMs = 15000;
+
   // ─── ICE candidate 큐 / 경로 ───
 
   /// callId 확정 전 수집된 ICE candidate 큐. `_callId` 세팅 시 [_flushPendingCandidates]로 비움.
@@ -424,6 +431,9 @@ class WebRtcService {
       _triggerIceRestart();
     } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _disconnectTimer?.cancel();
+      // Senior 일시 단절 grace timer cancel — Senior 복구 + ICE restart 성공으로 PC 복귀
+      _seniorDisconnectGraceTimer?.cancel();
+      _seniorDisconnectGraceTimer = null;
       _iceRestartInProgress = false; // 안전망
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = null;
@@ -480,6 +490,9 @@ class WebRtcService {
 
     _iceRestartAttempts++;
     _iceRestartInProgress = true;
+    // attempt 시작 print — sendIceRestartOffer 가 NetworkException throw 해도
+    // catch 의 실패 로그에서 attempt 번호 매칭 가능하도록 try 진입 직전에 출력.
+    print('WebRTC: ICE restart attempt=$_iceRestartAttempts 시작');
 
     try {
       await _peerConnection!.restartIce();
@@ -494,7 +507,7 @@ class WebRtcService {
         'sdp': offer.sdp,
         'type': offer.type,
       });
-      print('WebRTC: ICE restart offer 전송 (attempt=$_iceRestartAttempts)');
+      print('WebRTC: ICE restart offer 전송 성공 (attempt=$_iceRestartAttempts)');
 
       // answer 수신 대기 타이머 — 만료 시 _iceRestartInProgress 리셋 + 자동 재시도.
       // 재시도는 _triggerIceRestart 재호출로, 한도/flap window 자동 체크됨.
@@ -682,6 +695,31 @@ class WebRtcService {
     });
 
     _callEndSub = _signaling.listenForCallEnd(callId, (endReason) {
+      if (_isEnding) return;
+      // ★ Senior server-side onDisconnect 결과 — 즉시 hangUp 안 하고 grace 대기.
+      // 배경: KEP MTK WiFi 자발적 2~3s drop (kep_wifi_suspend_presence.md §"연관 이슈 1").
+      // grace 동안 Family PC keepalive timeout (5s) → ICE restart 자연 진입 →
+      // Senior 복구 시 통화 유지. 만료 시 hangUp(remoteEnded) 정상 종결.
+      if (endReason == 'seniorDisconnect') {
+        print('WebRTC: Senior 일시 단절 감지 → grace ${_seniorDisconnectGraceMs}ms 대기');
+        _seniorDisconnectGraceTimer?.cancel();
+        _seniorDisconnectGraceTimer = Timer(
+          const Duration(milliseconds: _seniorDisconnectGraceMs),
+          () {
+            if (_isEnding) return;
+            // PC 가 이미 CONNECTED 복귀했으면 hangUp 안 함 (ICE restart 성공 또는 자가 복구)
+            if (_peerConnection?.connectionState ==
+                RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+              print('WebRTC: Senior 복구 확인 → grace 종료, 통화 유지');
+              return;
+            }
+            print('WebRTC: Senior 복구 실패 → hangUp(remoteEnded)');
+            hangUp(reason: TerminateReason.remoteEnded);
+            onCallEnded?.call();
+          },
+        );
+        return; // 즉시 hangUp 안 함
+      }
       hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
     });
@@ -902,7 +940,7 @@ class WebRtcService {
         .listen((event) {
       if (event.snapshot.value == true && _callId == callId) {
         print('WebRTC: Senior 수락 감지 → 양방향 전환');
-        upgradeToCall();
+        upgradeToCall(reason: 'senior_accepted_auto');
       }
     });
   }
@@ -913,16 +951,20 @@ class WebRtcService {
   ///
   /// RecvOnly transceiver를 SendRecv로 변경하고 로컬 트랙을 추가한 뒤,
   /// 새 SDP offer를 생성하여 Senior에 전송. Senior가 renegotiation answer를 보내면 전환 완료.
+  /// - **Params**:
+  ///   - [reason] — FSM 전이 사유 태깅용. 호출자 구분:
+  ///     - `user_tapped_upgrade` — MonitoringScreen 의 "통화 전환" 버튼 탭
+  ///     - `senior_accepted_auto` — startCall 후 Senior 수락 감지 자동 전환
   /// - **Side Effects**: transceiver 방향 변경, 로컬 트랙 추가, _isMonitoring=false (전환 완료 시)
   /// - **호출**: [_listenForSeniorAccepted] (자동), MonitoringScreen._upgradeToCall (수동)
-  Future<void> upgradeToCall() async {
+  Future<void> upgradeToCall({String reason = 'user_tapped_upgrade'}) async {
     // 진입 조건: connected 또는 connecting 허용 (connecting 에선 답신 전 race 허용 — 기존 동작 유지)
     final currentPhase = _fsm.phase.value;
     if (currentPhase != CallPhase.connected &&
         currentPhase != CallPhase.connecting) return;
     if (_peerConnection == null || _callId == null) return;
-    if (!_fsm.to(CallPhase.upgrading, reason: 'senior_accepted')) return;
-    print('WebRTC: 모니터링 → 통화 전환');
+    if (!_fsm.to(CallPhase.upgrading, reason: reason)) return;
+    print('WebRTC: 모니터링 → 통화 전환 (reason=$reason)');
 
     // 모니터링 중 mute 시켰던 원격 오디오 track 재활성화
     _remoteStream?.getAudioTracks().forEach((t) => t.enabled = true);
@@ -975,7 +1017,7 @@ class WebRtcService {
     if (cid == null || _isEnding) return;
 
     // 전환 요청 + renegotiate offer 전송
-    // NetworkException (오프라인 등) → upgradeFailed 로 종결, 모니터링은 유지.
+    // NetworkException (오프라인 등) → hangUp(upgradeFailed) 로 깨끗한 종결.
     try {
       await _signaling.requestUpgrade(cid);
       if (_isEnding) return;
@@ -985,11 +1027,13 @@ class WebRtcService {
       });
       if (_isEnding) return;
     } on NetworkException catch (e) {
-      print('WebRTC: upgrade 네트워크 실패 → connected 복귀 $e');
-      // 통화 죽이지 않음 — upgrading → connected 복귀 (모니터링 유지)
-      if (_fsm.phase.value == CallPhase.upgrading) {
-        _fsm.to(CallPhase.connected, reason: 'upgrade_network_fail');
-      }
+      // 이 시점 pc 는 트랜시버 SendRecv 교체 + setLocalDescription(upgrade offer) 완료 상태.
+      // FSM 만 connected 로 되돌리면 PC 와 FSM 이 불일치해 이후 ICE restart 시 업그레이드
+      // SDP 가 Senior 에 흘러가 direction mismatch 를 만든다. 트랜시버 롤백은 SDP rollback
+      // 지원 불명확 + 연쇄 await race 리스크 → hangUp 이 가장 안전.
+      // UX: SnackBar "통화 전환에 실패했습니다" + MonitoringScreen pop → 사용자는 모니터링부터 재시도.
+      print('WebRTC: upgrade 네트워크 실패 → hangUp $e');
+      await hangUp(reason: TerminateReason.upgradeFailed);
       return;
     }
 
@@ -1037,6 +1081,8 @@ class WebRtcService {
     _stableTimer = null;
     _iceRestartAnswerTimer?.cancel();
     _iceRestartAnswerTimer = null;
+    _seniorDisconnectGraceTimer?.cancel();
+    _seniorDisconnectGraceTimer = null;
     _stopAecStats();
 
     // 모든 시그널링 구독 해제 (callEnd 콜백이 hangUp을 다시 호출하는 루프 방지)
