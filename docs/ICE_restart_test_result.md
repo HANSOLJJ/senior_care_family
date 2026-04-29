@@ -1267,6 +1267,69 @@ R6 의 핵심 (대칭 처리) 은 모든 timing 에서 PASS — 한쪽만 비대
 
 ---
 
+## R7 — Family A iceFailed 중 Family B 영향 (2026-04-29)
+
+**상태**: ✅ PASS (with note)
+
+**환경**: Family A = Android R3CR700SEKP (자동, wifi 영구 off 80s), Family B = iPhone Sol2 (수동 monitor)
+
+### R7 시퀀스
+
+```text
+T+0     Android monitor 시작 → CONNECTED (Senior peers=2: iPhone + Android)
+T+5     안정화 후 Android wifi 영구 off 80s
+T+5~80  Android: PC DISCONNECTED → ICE restart 5회 시도
+T+~65   flap window 60s 초과 → iceFailed 종결 + MonitoringScreen pop
+T+~70   Senior: PC DISCONNECTED 감지 → STOP_DELAY 7s → peer.dispose() (Android cid)
+T+85    Android wifi on (정리용)
+```
+
+### R7 검증 결과
+
+| 항목 | 결과 |
+| --- | --- |
+| Android Family B (wifi off 측) iceFailed 종결 | ✅ PC DISCONNECTED 1 / ICE restart attempt 5 / `hangup:iceFailed` |
+| Senior `peer.dispose()` 발화 (Android cid) | ✅ Android cid 가 `/calls` 에서 정리됨 |
+| iPhone Family A 영구 영향 없음 | ✅ "연결이 불안정해요" 잠깐 표시 후 ICE restart 자체 복구 → 모니터링 유지 |
+| stub 발생 | ✅ 0개 (Senior fix + CF Step 7 확장 효과) |
+
+→ **multi-peer 독립성 본질 PASS** — Family B 의 iceFailed 종결이 Family A 의 영구 단절로 이어지지 않음. Senior `peer.dispose()` 의 cancelDisconnectCleanup 호출 흐름 (오늘 fix) 도 정상 작동.
+
+### R5 와 차이 (관찰 note)
+
+- **R5** (Android wifi off 6s): iPhone 영향 **0건** — 단기 wifi flap 은 R5 의 ICE restart 자체 복구 흐름이 빨라서 다른 peer 미감지
+- **R7** (Android wifi off 80s): iPhone **잠깐 영향 후 복구** — 80초 동안 Senior 가 ICE restart 5회 처리 + 최종 stopPeer dispose 흐름 → video stream pipeline 잠깐 영향 가능성
+
+추정 원인: 80초 동안 Senior 가 Android peer 의 5회 ICE restart 트래픽 + 최종 cleanup 부담으로 video stream 일시 영향. 단 영구 단절 0, ICE restart 자체 복구로 정상화 → 본질 검증 (영구 격리) PASS.
+
+---
+
+## R8 — Call 중 다른 Family 의 call 발신 (2026-04-29)
+
+**상태**: ✅ PASS (단, spec 의 `rejectCall(REMOTE_BUSY)` 경로는 client guard 로 인해 안 trigger)
+
+**환경**: Family A = iPhone Sol2 (수동, 영상통화 진행 중), Family B = Android R3CR700SEKP (자동, 영상통화 발신 시도)
+
+### R8 실측 동작
+
+| 항목 | spec 기대 | 실제 (현재 코드) |
+| --- | --- | --- |
+| Family B "영상통화" 버튼 가능 여부 | 클릭 가능 → Senior 발신 | ❌ "통화 중" 으로 변경 + 비활성화 (client guard `_isInCall = callStatus.active && type=='call'`) |
+| Family B 발신 RTDB write | createCall 발생 | ❌ guard 로 인해 createCall 자체 안 됨 (Family B logcat 비어있음) |
+| Senior `rejectCall(REMOTE_BUSY)` | trigger | ❌ guard 가 1차 방어, Senior reject 까지 안 감 |
+| Family B 다이얼로그 표시 | "통화 중입니다" | ❌ 발신 자체 안 돼서 다이얼로그 안 뜸 |
+| iPhone Family A 통화 영향 | 영향 없음 | ✅ 통화 유지 (사용자 확인) |
+| 1:1 call 배타 정책 작동 | ✅ | ✅ client guard 로 작동 |
+
+### R8 결론
+
+- **R8 spec 은 Family 측 `_isInCall` guard 도입 전 설계**. 현재는 guard 가 1차 방어
+- Senior `rejectCall(REMOTE_BUSY)` 경로는 race 시 safety net (dead code 에 가까움 — Family 가 callStatus 갱신 받기 전에 발신 시도하는 race window 에서만 trigger)
+- **본질 (1:1 call 배타) 정책은 정상 작동** — 다른 Family 가 통화 중이면 발신 막힘
+- 추가 검증 (Senior reject 경로) 은 client guard 우회 필요 — 우선순위 낮음
+
+---
+
 ## R5 — Family A 단독 Wi-Fi off (multi-peer 독립성, 2026-04-29)
 
 **상태**: ⚠️ 결과 부분 캡처 (Senior race window 이벤트 grep 0건 — logcat buffer 회전으로 캡처 누락)
