@@ -396,22 +396,61 @@ async function doOrphanCleanup({ aggressive = false } = {}) {
     }
   }
 
-  // Step 7: 고아 calls 정리 (24시간 초과 + active 아님)
-  // - cutoff 24h: 정상 모니터링 (수십분~수시간) 절대 안 건드리기
-  // - status="answered" 보호: 활성 통화 절대 삭제 안 함 (혹시 24h+ 활성이면 비정상이지만 안전상 보호)
-  // - 일반 케이스: 양쪽 앱 종료 후 onDisconnect 가 못 발화한 좀비 노드 (전원 강제 차단 등)
+  // Step 7: 고아 calls 정리
+  // (a) 정상 통화 노드 24시간 초과 + active 아님
+  //     - cutoff 24h: 정상 모니터링 (수십분~수시간) 절대 안 건드리기
+  //     - status="answered" 보호: 활성 통화 절대 삭제 안 함 (혹시 24h+ 활성이면 비정상이지만 안전상 보호)
+  //     - 일반 케이스: 양쪽 앱 종료 후 onDisconnect 가 못 발화한 좀비 노드 (전원 강제 차단 등)
+  // (b) Stub 노드 정리 (createdAt 없음 = 정상 createCall 거치지 않은 비정상 노드)
+  //     - Senior server-side onDisconnect 가 빈 path 에 fire (Senior offline 동안 server timeout) → status+endReason 만 있는 stub
+  //     - 비동기 ICE candidate push 가 cleanupCall remove 직후 race → candidates 만 있는 partial 노드
+  //     - 식별: !callerUid (정상 createCall 은 callerUid 항상 set, atomic). callerUid 없으면 stub 확정
+  //     - cutoff 5분: 정상 createCall 과 동시 race 회피 (push 직후 짧은 순간 callerUid 미반영 가능성 — 보수적 5분 마진)
+  // Firebase push id 의 timestamp 부분 디코딩 (push id 첫 8 chars 가 ms timestamp encode)
+  // stub 노드는 createdAt 없으므로 push id 자체에서 시간 추출 → grace cutoff 비교용.
+  const PUSH_CHARS = "-0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz";
+  const pushIdTimestamp = (pushId) => {
+    if (!pushId || pushId.length < 8) return 0;
+    let ts = 0;
+    // Firebase push id 의 첫 8 chars (index 0-7) 가 ms timestamp encoding.
+    // 시작 `-` 는 PUSH_CHARS[0] = 0 contribution.
+    for (let i = 0; i < 8; i++) {
+      const idx = PUSH_CHARS.indexOf(pushId[i]);
+      if (idx < 0) return 0;
+      ts = ts * 64 + idx;
+    }
+    return ts;
+  };
+
   try {
     const callsSnap = await db.ref("calls").once("value");
     const calls = callsSnap.val() || {};
     const callsCutoff = now - 24 * 60 * 60 * 1000;
+    const stubCutoff = now - 5 * 60 * 1000; // 5분 — 정상 createCall race 회피
     for (const [cid, data] of Object.entries(calls)) {
       if (!data || typeof data !== "object") continue;
       const createdAt = data.createdAt;
       const status = data.status;
+      const callerUid = data.callerUid;
+
+      // (a) 정상 통화 노드 24h+ 정리
       if (createdAt && createdAt < callsCutoff && status !== "answered") {
         await db.ref(`calls/${cid}`).remove();
         result.calls = (result.calls || 0) + 1;
-        console.log(`Step7: 고아 call 삭제: ${cid} (createdAt: ${new Date(createdAt).toISOString()}, status: ${status})`);
+        console.log(`Step7a: 24h+ orphan call 삭제: ${cid} (createdAt: ${new Date(createdAt).toISOString()}, status: ${status})`);
+        continue;
+      }
+
+      // (b) Stub 노드 정리 (callerUid 없음 = 정상 createCall 거치지 않음)
+      // - 정상 createCall 은 callerUid + createdAt 등을 atomic set 하므로 callerUid 없으면 stub 확정
+      // - push id timestamp 가 5분 전 이상이면 정리 (정상 push 직후 race 회피)
+      if (!callerUid) {
+        const pushTs = pushIdTimestamp(cid);
+        if (pushTs > 0 && pushTs < stubCutoff) {
+          await db.ref(`calls/${cid}`).remove();
+          result.stubs = (result.stubs || 0) + 1;
+          console.log(`Step7b: stub call 삭제: ${cid} (pushTs: ${new Date(pushTs).toISOString()}, status: ${status})`);
+        }
       }
     }
   } catch (e) {

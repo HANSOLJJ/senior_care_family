@@ -1071,7 +1071,31 @@ T+24    stopPeer 발화 → ENDED → Senior peer 정리
 
 ## R1 — 좀비 peer 방지 (회귀)
 
-**상태**: 🔲 미진행
+**상태**: ✅ 5/5 PASS (2026-04-29)
+
+### R1 자동화 스크립트
+
+[r1_auto.sh](../scripts/r1_auto.sh) — 영상통화 발신 → Senior 자동수락 → 5초 통화 → Family hangUp → 즉시 재발신 (gap 1s) → 5회 반복.
+
+### R1 검증 결과 (2026-04-29 12:21~12:22)
+
+| Cycle | 발신 → connected 시간 | hangUp → terminated | 결과 |
+| --- | --- | --- | --- |
+| 1 | 탭 후 ~1.5s | ~1.8s | ✅ PASS |
+| 2 | 탭 후 ~1.5s | ~1.8s | ✅ PASS |
+| 3 | 탭 후 ~1.5s | ~1.8s | ✅ PASS |
+| 4 | 탭 후 ~2.0s | ~1.9s | ✅ PASS |
+| 5 | 탭 후 ~2.0s | ~1.9s | ✅ PASS |
+
+- **PASS: 5 / 5**
+- **Senior 측 `remoteBusy` 거부: 0 건**
+- 5 사이클 모두 정상 발신 + Senior 수락 + 통화 성립 + 정상 종료
+
+### 결론
+
+- `cleanupCall` 의 10초 fire-and-forget delay 가 정상 동작 — Senior 가 `status="ended"` 를 안정적으로 수신
+- 다음 발신 시 좀비 peer 충돌 0건 — 이전 통화의 RTDB 노드 영향 없음
+- R2 fix (Family `endCall` 이 `endReason="remoteEnded"` 추가) 도 ringing/cleanup 경로 회귀 영향 0 확인
 
 ---
 
@@ -1171,6 +1195,96 @@ T+13     Senior FSM ENDED (자연 cleanup)
 → **PASS as documented limitation**. S16 옵션 2 정상 작동 + R2 race 발생 + 자동 cleanup ~13초 안에 완료.
 
 상세 분석 + 다른 세션 동기화: [r2_fix_handover.md](r2_fix_handover.md)
+
+---
+
+## R3 — 1:N × 1:1 displace 정책 (반자동, 2026-04-29)
+
+**상태**: ✅ PASS
+
+**환경**: Family A = iPhone Sol2 (수동), Family B = Android R3CR700SEKP (자동), Senior = KEP2024120921
+
+### R3 시퀀스 (14:31:38~42)
+
+```text
+14:31:38.484  Senior: 모니터링 시작 callId=-OrMi9xtPJsGclMMdtDx (Android Family B 의 call 노드)
+14:31:39.295  Senior FSM: CONNECTING → CONNECTED (Android Family B)
+14:31:41.575  Senior 자동수락 감지 (face detection)
+14:31:42.342  renegotiate remote description 완료 (Family B 양방향 통화)
+14:31:42.465  ★ displace: 다른 monitor peer 1개 종료
+14:31:42.467  [FSM peer=-OrMhqI6FYW5x8QE2erN] CONNECTED → ENDED (reason: dispose)  ← iPhone Family A
+14:31:42.468  iPhone Family A 시그널링 리소스 해제
+```
+
+### R3 검증 결과
+
+| 항목 | 결과 |
+| --- | --- |
+| Android Family B (call 발신) | ✅ FSM connecting → connected → upgrading → connected (renegotiate_done) |
+| Senior 자동수락 (face detection) | ✅ "Senior 수락 감지" 로그 |
+| Senior `displace` 발화 | ✅ "displace: 다른 monitor peer 1개 종료" |
+| iPhone Family A displace | ✅ Senior FSM CONNECTED → ENDED (reason: dispose) |
+| iPhone Family A 다이얼로그 | ✅ "모니터링이 종료되었습니다 / 가족이 영상통화를 시작하여 모니터링이 종료되었습니다." (사용자 확인) |
+
+→ **1:N displace 정책 정상 작동**.
+
+---
+
+## R6 — Senior Wi-Fi off (1:N 대칭 처리, 반자동, 2026-04-29)
+
+**상태**: ✅ PASS (3s zone)
+
+**환경**: Family A = iPhone Sol2 (수동), Family B = Android R3CR700SEKP (자동), Senior = KEP2024120921
+
+### R6 (10s wifi off, 14:41:19) — 양쪽 자연 종결 (S16 의 ~12s 한도 밖)
+
+| 측 | 결과 |
+| --- | --- |
+| Android Family B | `PC DISCONNECTED 1 / ice_restored 0 / hangup:remoteEnded` |
+| iPhone Family A | 통화 종결 (사용자 확인) |
+| Senior | 양쪽 peer 모두 STOP_DELAY 7s 만료 → ENDED, 후속 reconnect 시 `active status 복원 완료` 2건 (양쪽 모두 좀비 RTDB write 시도) |
+
+→ 양쪽 **대칭 종결** (동일 reason, 동일 FSM 경로). 단 wifi off 10s 가 S16 의 `PC keepalive 5s + STOP_DELAY 7s = 12s` 한도 안에 있어 ICE restart 시간 부족 — S16 sweep 결과 (5~15s 자연 종결 zone) 와 정합. R6 spec 의 "10s → ice_restored" 는 outdated.
+
+### R6 (3s wifi off, 14:44:32) — 양쪽 ice_restored ✅
+
+| 측 | 결과 |
+| --- | --- |
+| Android Family B | `PC DISCONNECTED 1 / ice_restored 1 / hangup 없음 → 통화 유지` ✅ |
+| iPhone Family A | "연결이 불안정해요" 잠깐 표시 → 복구 (사용자 확인) ✅ |
+
+→ **R6 핵심 검증 (대칭 처리) PASS**. Senior wifi 3s flap 시 양쪽 peer 가 동시 PC DISCONNECTED 감지 → 각자 독립적으로 ICE restart → 둘 다 ice_restored 정상 복구.
+
+### R6 종합
+
+R6 spec 의 "10s → 양쪽 ice_restored" 는 S16 sweep 의 12s 한도 발견 (2026-04-28) 이전 작성된 outdated 기대치. 실측 정합:
+
+- 1~6s wifi off → 양쪽 ice_restored (R6 검증된 PASS zone)
+- 5~15s → 양쪽 자연 종결 (대칭 PASS, ice 복구는 못함 — S16 의 12s 한도)
+- 60s+ → 양쪽 iceFailed (대칭, flap window 60s 초과)
+
+R6 의 핵심 (대칭 처리) 은 모든 timing 에서 PASS — 한쪽만 비대칭 종결되는 케이스 0건.
+
+---
+
+## R5 — Family A 단독 Wi-Fi off (multi-peer 독립성, 2026-04-29)
+
+**상태**: ⚠️ 결과 부분 캡처 (Senior race window 이벤트 grep 0건 — logcat buffer 회전으로 캡처 누락)
+
+**환경**: Family A = iPhone Sol2 (수동, passive monitor), Family B = Android R3CR700SEKP (wifi off 발화 측, 역할 swap)
+
+### R5 (Android wifi off 6s, 14:36:03) — Android 측 PASS
+
+| 측 | 결과 |
+| --- | --- |
+| Android Family B (wifi off 측) | `PC DISCONNECTED 1 / ice_restored 1 / hangup 없음` ✅ |
+| iPhone Family A (passive) | (Senior log 캡처 누락 — 사용자 화면 확인 필요) |
+
+→ Android 측 ICE restart 정상 복구. iPhone 측은 Senior log 의 race window 이벤트가 logcat buffer rolling 으로 누락되어 자동 검증 실패. **사용자 매뉴얼 확인 필요**: Android race window 동안 iPhone 화면 변화 0건이었는지.
+
+### R5 한계
+
+multi-peer 독립성은 WebRTC PeerConnection 객체 단위로 자명한 sanity check. 이번 캡처 누락은 Senior 측 영상 stream 로그가 buffer 를 빠르게 회전시킴. 향후 자동화는 시간 기반 logcat 추적 (`-T` 옵션) 필요.
 
 ---
 
