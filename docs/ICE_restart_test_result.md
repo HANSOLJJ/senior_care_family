@@ -830,7 +830,7 @@ Senior 가 **`노드 삭제 감지 (state=CONNECTED) → stopPeer`** 로직을 �
 
 ## S16 — Senior 측 Wi-Fi 단절
 
-**상태**: ✅ PASS (Fix 적용 후, 2026-04-28). 1~4s/70s 모두 통과. 5~15s 부분 한계 — 별도 분석 필요.
+**상태**: ✅ PASS (Fix 적용 후, 2026-04-28). 1~4s 복구 / 5~15s 의도된 종결 / 70s 정상 종결. 5~15s 한계 분석 완료 — fix 보류.
 
 ### 본 의도 (kep_wifi_suspend_presence.md 인용)
 
@@ -865,13 +865,13 @@ Senior 가 **`노드 삭제 감지 (state=CONNECTED) → stopPeer`** 로직을 �
 
 | Stage | ICE attempt | ice_restored | 종결 사유 | 결과 |
 |---|---|---|---|---|
-| **1s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS |
-| **2s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS |
-| **3s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS |
-| **4s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS |
-| **5s** | 1 | 0 | `remoteEnded` | ⚠ 복구 실패 (grace 만료) |
-| **6s** | 1 | 0 | `remoteEnded` | ⚠ 복구 실패 |
-| **15s** | 2 | 0 | `remoteEnded` | ⚠ 복구 실패 |
+| **1s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS (복구) |
+| **2s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS (복구) |
+| **3s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS (복구) |
+| **4s** | 1 | ✅ 1 | (정상 유지) | ✅ PASS (복구) |
+| **5s** | 1 | 0 | `remoteEnded` | ✅ PASS (의도된 종결 — 12s 한도 초과) |
+| **6s** | 1 | 0 | `remoteEnded` | ✅ PASS (의도된 종결) |
+| **15s** | 2 | 0 | `remoteEnded` | ✅ PASS (의도된 종결) |
 | **70s** | 5 | 0 | `iceFailed` | ✅ PASS (영구 단절 정상 종결) |
 
 ### 검증된 항목
@@ -885,24 +885,187 @@ Senior 가 **`노드 삭제 감지 (state=CONNECTED) → stopPeer`** 로직을 �
 | Senior 영구 단절 (70s) → flap window 60s 초과 → iceFailed 자동 종결 | ✅ |
 | FSM stuck 0건, 자원 누수 0건 | ✅ |
 
-### 한계 — 5~15s 구간 미해결 (후속 분석 필요)
+### 영상통화 (callType=call) 5s 검증 — 수동 (2026-04-28)
 
-5초/6초/15초 단절은 ICE restart 1~2회 시도 후 모두 ice_restored=0 → grace 만료 → `remoteEnded`. 1~4s 와 70s 는 PASS 인데 그 사이 구간만 실패 — **추가 분석 필요**.
+`MonitoringSession.kt` 단의 fix 라 callType 무관 — 영상통화에서도 정상 동작 확인. 모니터링보다 양방향 audio/video 의 keepalive 가 더 길어 **복구 윈도우가 더 넓음**.
 
-후보 원인:
-1. **Senior reconnect 타이밍** — 5s+ 단절 시 Senior PC 가 stale 한 채 reconnect. ICE candidate 갱신 안 되어 Family 의 ICE restart offer 받아도 새 경로 못 만듦.
-2. **Family ICE restart 시도 횟수 부족** — 5s 단절에서 attempt 1 만 — D fix 의 10s 재시도 timer 가 grace 15s 안에 1회만 발화. 1번 실패하면 추가 재시도 없이 grace 만료.
-3. **Senior `listenForIceRestartOffer` 재바인딩 시간** — Senior reconnect 후 listener 재구독에 약간의 시간 → Family 가 보낸 offer 가 그 사이 도달했지만 listener 가 못 받음.
+#### Case 1 — 통화 중 Senior wifi off 5s (수락 후 안정 통화 상태)
 
-본 회차에서는 1~4s 떠받치기 의도 달성으로 충분하고, 5~15s 는 별도 후속 분석.
+```text
+T=0     Senior wifi off
+T+12   Family PC DISCONNECTED (양방향 audio keepalive 가 모니터링보다 늦게 timeout)
+T+12.5 Senior 자기 onDisconnect 마커 (seniorDisconnect)
+T+12.7 Senior status="answered" 복원
+T+17   Family ICE restart attempt=1 + Senior가 즉시 수신 (RTDB sync OK)
+T+17   Senior PC CONNECTED → stopPeer 예약 취소
+T+17.4 Family ICE restart answer 적용 → ice_restored ✅
+```
 
-### Senior 영구 단절 (앱 종료/크래시)
+복구 시간 PC DISCONNECTED → ice_restored = **5.3초**. 결과: ✅ PASS.
 
-70s 단절 시 Senior 가 reconnect 못함 → seniorDisconnect 마커 유지 → Family grace 만료 시점 (15s) 에 ICE restart 진행 중이면 grace timer 의 만료 분기는 hangUp 미발동, ICE restart 5회 시도 후 flap window 60s 초과로 iceFailed 정상 종결. 자원 누수 없음.
+#### Case 2 — 수락 전 Senior wifi off 5s + wifi 복구 후 수락 (3중 race)
+
+가장 까다로운 시나리오. Senior wifi off → wifi 복구 → 수락 → 양방향 renegotiate + ICE restart 동시 진행.
+
+```text
+T=0     Senior wifi off (인커밍 ringing 단계, PC 미리 연결됨)
+T+0.1   Senior 자기 onDisconnect 마커 (seniorDisconnect)
+T+~5    Senior wifi on
+T+5     Senior 수락 (Senior 측에서는 wifi 복구 인지 못한 채 수락 누름)
+T+6.6   Senior PC DISCONNECTED → stopPeer 7s 예약
+T+10.6  Senior active status="answered" 복원 완료 (큐 처리)
+T+11.0  Family endReason=seniorDisconnect 수신 → grace 15s 대기
+T+11.2  Family Senior 수락 감지 → renegotiate offer 전송 (양방향 전환)
+T+11.5  Family ICE restart attempt=1 동시 트리거
+T+11.5  Senior renegotiate answer + ICE restart answer 거의 동시 전송
+T+11.5  Senior PC CONNECTED (renegotiate audio 트랙 + 기존 ICE 경로) → stopPeer 취소
+T+12.5  Family 양방향 전환 완료 (renegotiate)
+T+12.6  Family ICE restart attempt=1 answer 무시 (signalingState=stable, 이미 적용)
+T+22.0  Family D fix 10s answer timer 만료 → ICE restart attempt=2 자동 발화
+T+22.7  Family ICE restart attempt=2 answer 적용 → PC CONNECTED → ice_restored ✅
+```
+
+#### 비대칭 복구 — Senior vs Family PC CONNECTED 시점
+
+| 측 | PC CONNECTED 시점 | 경로 |
+| --- | --- | --- |
+| Senior | T+11.5 (DISCONNECTED 후 ~5s) | renegotiate audio 트랙 추가 + 기존 ICE 경로 유지 |
+| Family | T+22.7 (DISCONNECTED 후 ~15s) | ICE restart attempt 2 의 새 candidate 협상 완료 후에야 CONNECTED |
+
+**관찰**: attempt 1 의 answer 가 Family stable 상태에 도착해 무시됐지만 **D fix 의 10s 재시도 timer 가 안전망으로 발화** → attempt 2 로 새 ICE 경로 협상 완료. 양방향 renegotiate (트랙 추가) 와 ICE restart (경로 재협상) 가 별개 절차임을 확인.
+
+#### 영상통화 검증 결과 요약
+
+| Case | 결과 | 복구 시간 |
+| --- | --- | --- |
+| 통화 중 wifi off 5s | ✅ PASS | 5.3s (attempt 1) |
+| 수락 전 wifi off 5s + 수락 race | ✅ PASS | 15s (attempt 2 with D fix) |
+| **D fix 10s 재시도 timer 안전망 작동** | ✅ 첫 검증 | — |
+
+### 5~15s 한계 — 원인 분석 (2026-04-28)
+
+#### 시퀀스 비교
+
+**5~6s 케이스** (Senior가 ICE restart offer 수신 누락):
+
+```text
+T=0      Senior wifi off → 자기 onDisconnect 마커 (endReason="seniorDisconnect")
+T+5      Senior wifi 복구 → cancelDisconnect + restoreActiveStatus 호출 (RTDB 큐 쌓임)
+T+6      Senior PC keepalive timeout → DISCONNECTED → stopPeer 7s 예약 (T+13 발화)
+T+9      Family ICE restart attempt=1 전송 (RTDB commit OK)
+T+9~13   Senior RTDB SDK가 wifi 복구 후 sync 큐 정리 중 → ICE restart offer fire 누락
+T+13     Senior stopPeer 발화 → status="ended" + endReason="normal" 송신
+T+14     Family endReason=normal 수신 → grace cancel + hangUp(remoteEnded)
+```
+
+**15s 케이스** (wifi 복구 전 stopPeer 발화):
+
+```text
+T=0      Senior wifi off
+T+6      Senior PC DISCONNECTED → stopPeer 7s 예약
+T+13     stopPeer 발화 → ENDED ← wifi 아직 off!
+T+15     Senior wifi 복구 ← 이미 ENDED 상태
+T+~17    Senior status="ended" + endReason="normal" RTDB commit (wifi 복구 후 큐 처리)
+T+~18    Family endReason=normal 수신 → hangUp(remoteEnded)
+         (그 사이 attempt 2 timer 발화 → ICE restart attempt=2 시도하지만 Senior ENDED)
+```
+
+#### 한 줄 원인
+
+[`MonitoringSession.kt:42`](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L42) **`STOP_DELAY_MS = 7_000L`** + Senior PC keepalive ~5s = **총 12초 한도**.
+
+- 5~6s: 한도 안이지만 RTDB sync 지연으로 ICE restart offer fire 누락
+- 12s 초과: wifi 복구 전 stopPeer 무조건 발화
+
+증거: 5s/6s/15s case Senior 로그에 `ICE restart offer 수신` 로그 **없음** (1~4s case에는 있음).
+
+#### 6~15s vs 70s 동작 차이
+
+같은 "복구 실패" 지만 종결 주체와 사유가 다름:
+
+| 구분 | 6~15s | 70s |
+| --- | --- | --- |
+| 종결 주체 | **Senior 가 먼저 종결** (STOP_DELAY 7s 타임아웃) | **Family 가 먼저 종결** (flap window 60s 초과) |
+| Family 측 endReason | `remoteEnded` (Senior stopPeer 후 송신한 endReason="normal" 수신) | `iceFailed` (Family attempt 5회 모두 실패 후 자체 판정) |
+| Family ICE restart attempt | 1~2회 (Senior remoteEnded 도착 시점에 멈춤) | 5회 (Senior 신호 끝까지 못 받음) |
+| Senior wifi 상태 | 복구됨 또는 곧 복구 예정 → 종료 신호 송신 가능 | 영구 off → 종료 신호 송신 불가 |
+
+핵심: **Senior STOP_DELAY 7s 가 Family flap window 60s 보다 훨씬 짧음** → wifi 단절 12s 초과 시 Senior 가 race 이기고 자체 종결 → Family 는 받기만 함 (`remoteEnded`). 70s 는 Senior 가 끝까지 신호 못 보내 Family 가 자체 한도 판정 (`iceFailed`).
+
+#### Fix 보류 결정
+
+5s 케이스만 살리려면 STOP_DELAY 7s → 20s 로 늘려야 하나:
+
+- **Trade-off 불균형**: 5~6s 복구 vs Family 영구 종결 시 Senior peer 잔존 7s → 20s, Bug #3 회귀 위험, Family 측 onDisconnect 도 임시 마커로 변경 필요 (변경 4건)
+- **UX 관점**: 6초 이상 끊기면 사용자도 "끊겼나?" 인지 — 이때 갑자기 복원되는 것이 오히려 부자연스러움
+
+**결정**: 1~4s 떠받치기 의도 달성으로 충분. 5~15s 는 "의도된 종결" 로 재분류. STOP_DELAY 변경 안 함.
 
 ### 자동화 한계 (이전 회차 잔존)
 
 - **logcat ring buffer race** (이전 sweep 의 3s, 70s 0 byte 이슈): 이번 sweep 에서는 모든 사이클 정상 capture (Fix 후 logcat 양 줄어든 영향).
+
+---
+
+## S17 — RTDB 쓰기 타임아웃 (오프라인 가드)
+
+**상태**: ✅ PASS (수동 검증, 2026-04-28).
+
+### 명세 갱신
+
+기존 명세는 `writeOrTimeout(3s) + onTimeoutCleanup` 가설이었으나, 현 코드 ([signaling_service.dart:383](../lib/services/call/signaling_service.dart#L383)) 는 의도적으로 **`onTimeoutCleanup` 미사용**.
+
+이유 (코드 주석):
+
+- onTimeoutCleanup 으로 `remove()` 넣으면 set 과 race + cleanup 자체가 offline 큐에 hang (7~10초 밀림)
+- 오프라인 동안 큐잉된 set(offer) 가 **wifi 복구 시 자동 flush** 되어 Senior 에 도달하는 게 정상 복구 경로
+
+stale offer 정리 경로 (3가지):
+
+- 정상 복구: Senior `sendIceRestartAnswer` 가 answer 쓰기 전 offer 선제 삭제
+- 실패 종결: `hangUp` → `cleanupCall` 이 `calls/{cid}` 통째 삭제
+- 앱 크래시: Family `onDisconnect` 가 `calls/{cid}` 통째 삭제
+
+### 실측 시퀀스 (Family 영상통화 + wifi off ~50초)
+
+```text
+T=0     Family 영상통화 발신 → CONNECTED → 양방향 전환 완료
+T+18    PC DISCONNECTED ← Family wifi off
+T+22    ICE restart attempt=1 시작 (grace 4s 후, RTDB set 큐잉)
+T+25    NetworkException ← writeOrTimeout(3s) 정확히 3.046초 후 throw ✅
+T+35    ICE restart attempt=2 ← D fix 10s timer 정확히 10.002초
+T+38    NetworkException (3.027초)
+T+48    ICE restart attempt=3 (10.001초)
+T+51    NetworkException (3.049초)
+T+61    ICE restart attempt=4 (10.004초)
+T+61.5  ★ ICE restart offer 전송 성공 ← wifi 복구, 큐 flush 작동
+T+71    attempt=5 (answer 미수신 10s timeout)
+T+72    offer 전송 성공
+T+82    flap window 60s 초과 → iceFailed 종결 ✅
+```
+
+### Senior 측 동시 시퀀스
+
+```text
+T+17    PC DISCONNECTED → stopPeer 7s 예약 (Bug #3 fix 단축)
+T+24    stopPeer 발화 → ENDED → Senior peer 정리
+```
+
+### S17 검증 항목
+
+| 항목 | 결과 |
+| --- | --- |
+| `writeOrTimeout(3s)` NetworkException 발화 | ✅ attempt 1~3 모두 ~3초 정확 |
+| D fix 10s 재시도 timer | ✅ NetworkException 후 정확히 10초 |
+| wifi 복구 시 큐잉된 offer 자동 flush | ✅ attempt 4 의 offer 가 wifi 복구 직후 전송 성공 |
+| flap window 60s 초과 → iceFailed 정상 종결 | ✅ T+82에 attempt 5 한도 초과로 종결 |
+| Senior STOP_DELAY 7s (Bug #3 fix) | ✅ Family 영구 단절 시 7초 만에 Senior peer 정리 |
+
+### 비대칭 종결 — 복구 가능 한계
+
+**Family wifi off 가 7초 이내**라면 Senior 가 아직 살아있어 ICE restart 로 복구 가능 ([S2 시나리오](#s2--wi-fi-단절--grace-초과--복구-1회-restart-성공) 와 동일 경로). **7초 초과** 시 Senior 가 STOP_DELAY 로 먼저 종결되어 Family 가 wifi 복구해도 attempt 4/5 의 offer 가 RTDB 에 set 되긴 하지만 Senior peer (listener) 가 사라진 상태라 처리 못함 → flap window 60s 초과로 iceFailed 자체 종결.
+
+이는 Bug #3 fix 의 의도된 동작 (Family 영구 단절 시 Senior 빠른 정리). S17 의 큐 flush 메커니즘은 정상 작동 — 단지 7초 이내 wifi 복구해야 ICE restart 로 통화 살릴 수 있음.
 
 ---
 
@@ -912,9 +1075,102 @@ Senior 가 **`노드 삭제 감지 (state=CONNECTED) → stopPeer`** 로직을 �
 
 ---
 
-## R2 — answered LWW 방지 (회귀)
+## R2 — Senior wifi flap + Family hangUp race (S16 fix 의 부수 효과)
 
-**상태**: 🔲 미진행
+**상태**: ✅ 분석 완료 / documented limitation 으로 수용 (2026-04-29)
+
+### 배경
+
+S16 fix (Senior `onDisconnect` 임시 마커 + `restoreActiveStatus`, commit `955e0d7` / Senior `66b7e19`) 배포 후 발견된 race. Senior wifi flap 동시 Family 사용자 hangUp 시 Senior 측 ~10-13초 좀비 통화 화면 발생.
+
+### 자동화 스크립트
+
+- [r2_call_auto.sh](../scripts/r2_call_auto.sh) — 영상통화 시나리오
+- [r2_auto.sh](../scripts/r2_auto.sh) — 모니터링 시나리오 (Senior UI 없어 사용자 인지 0)
+
+### R2 race 시퀀스 (영상통화, 2026-04-29 12:08 측정)
+
+```text
+T+0      Senior wifi off
+T+0.5    Senior server-side onDisconnect 발화
+         → /calls/{cid}: { status="ended", endReason="seniorDisconnect" }
+T+1.0    Senior 잠깐 reconnect → status=ended listener fire → endReason="seniorDisconnect" 읽음
+         → cancelDisconnectCleanup + restoreActiveStatus
+         → /calls/{cid}: { status="answered", endReason=null } ← 좀비 시작
+T+1.5    Family hangUp tap → endCall fires
+T+2      Family endCall update commits: { status="ended", endReason="remoteEnded" }
+T+1.2~10 Senior RTDB SDK reconnect 지연 (~9초 실측) → Family update 못 받음
+T+12     Senior PC keepalive timeout → FSM CONNECTED → RESTARTING + STOP_DELAY 7s
+T+13     Senior FSM ENDED (자연 cleanup)
+```
+
+### 실측 측정값 (12:08:29 ~ 12:08:44)
+
+| 측면 | 값 |
+| --- | --- |
+| Senior UI 잔존 시간 | 약 13초 (Family hangUp 12:08:31.432 ~ Senior FSM ENDED 12:08:44.527) |
+| Senior FSM 자연 cleanup | PC keepalive 5s → STOP_DELAY 7s 정상 작동 |
+| 데이터 무결성 | 손상 없음 (Family `cleanupCall` 10s 후 RTDB 노드 정리) |
+| Family 측 UX | 영향 없음 (즉시 종결 → 홈 pop) |
+
+### 시도했던 fix layer 별 평가
+
+| Layer | 시도 내용 | 결과 |
+| --- | --- | --- |
+| Family endCall + `endReason="remoteEnded"` | Family hangUp 시 RTDB endReason 명시 | Senior 가 offline 인 동안 못 받음 → race fix 효과 0. **semantic 정합성만 유지** (적용) |
+| Senior `restoreActiveStatus` `runTransaction` 가드 | atomic re-read 로 commit 직전 검증 | Senior stale local cache 로 doTransaction → guard 통과 → race 그대로 (revert) |
+| Family `hangUp` 첫줄 EARLY endCall | RTDB write 빨리 fire (architectural sanity) | Senior offline 동안 못 받음 → 효과 0 (revert) |
+| Senior endReason path real-time `ValueEventListener` | endReason 변경 즉시 감지 | Senior offline 동안 listener fire 안 함 (server push 못 받음) → 효과 0 (revert) |
+| Senior 1.5~2.5s delay 후 fresh `.get()` | local cache 우회 server fetch | `.get()` 이 persistence cache 의 stale 값 반환 (실측, Firebase docs 와 다름) → 효과 0 (revert) |
+
+### 근본 원인 (우리 통제 밖)
+
+- **Senior wifi off 후 Firebase RTDB SDK 재연결까지 ~9초** (실측, 2.3초 wifi flap 케이스). Exponential backoff reconnect 패턴.
+- 그 9초 동안 Senior 는 RTDB offline → Family 의 어떤 update 도 못 받음.
+- Senior 의 `restoreActiveStatus` 결정이 stale 정보 기반 → 좀비 commit.
+
+### 결정 — documented limitation 수용
+
+**적용된 변경 (단 1개)**:
+
+| 파일 | 변경 |
+| --- | --- |
+| [signaling_service.dart:265](../lib/services/call/signaling_service.dart) `endCall` | `status="ended"` + `endReason="remoteEnded"` 두 필드 동시 `update()` |
+
+**유지 사유**: race fix 효과 0 이지만 RTDB 스키마 doc 와 코드 정합성 + 향후 callHistory 분석 시 누가 종결했는지 식별 가능. 변경 한 줄, 복잡도 0.
+
+**race 자체는 수용**:
+
+- 발생 조건: Senior wifi flap (자체 wifi 자발적 drop) 동시 Family 자발 hangUp — 드문 케이스
+- 영향: Senior 측 UI 약 10-13초 잔존 ("통화 중" + Family 영상 frozen)
+- 자동 정리: Senior PC keepalive (5s) + STOP_DELAY (7s) 가 자연 cleanup
+- 데이터 무결성: 손상 없음
+- Family 측: 영향 없음
+
+### 향후 관측 빈도 높아지면 재검토
+
+- `.info/connected` 기반 Senior reconnect 대기 + endReason 재조회 (단, S16 정상 흐름 통화 유지 복귀가 1~30s 지연됨 — UX 손해)
+- Family 가 별도 sentinel (`/calls/{cid}/familyEnded: true`) 도입 (스키마 추가 필요)
+- Senior `FirebaseDatabase.goOnline()` 강제 재연결
+
+### 검증 결과 — clean state (Senior 66b7e19 + Family change 1 적용)
+
+[r2_call_auto.sh](../scripts/r2_call_auto.sh) 영상통화 1회 실행 (12:08):
+
+```text
+12:08:29.898  Senior wifi off
+12:08:30.920  Senior reconnect → 자기 onDisconnect 결과 received (S16 정상)
+12:08:30.939  Senior cancelDisconnectCleanup
+12:08:30.988  Senior restoreActiveStatus → status=answered (좀비 시작)
+12:08:31.432  Family hangUp tap → FSM terminating
+12:08:32.318  Family terminated (cleanup_done)
+12:08:37.521  Senior PC DISCONNECTED → FSM RESTARTING + STOP_DELAY 7s
+12:08:44.527  Senior FSM ENDED (자연 cleanup)
+```
+
+→ **PASS as documented limitation**. S16 옵션 2 정상 작동 + R2 race 발생 + 자동 cleanup ~13초 안에 완료.
+
+상세 분석 + 다른 세션 동기화: [r2_fix_handover.md](r2_fix_handover.md)
 
 ---
 

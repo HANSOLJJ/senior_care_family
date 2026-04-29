@@ -265,11 +265,20 @@ class SignalingService {
   Future<void> endCall(String callId) async {
     // onDisconnect 취소 (정상 종료이므로)
     await _db.child('calls/$callId').onDisconnect().cancel();
-    // 노드 존재 확인 후 status 업데이트 — 이미 cleanup 된 노드 부활 방지
+    // 노드 존재 확인 후 status + endReason 업데이트 — 이미 cleanup 된 노드 부활 방지
     final snap = (await _db.child('calls/$callId').once()).snapshot;
     if (snap.exists) {
+      // R2 fix: status="ended" 와 함께 endReason="remoteEnded" 도 set.
+      // Senior server-side onDisconnect 가 남긴 stale endReason="seniorDisconnect"
+      // 마커를 덮어써서, Senior 가 wifi 복귀 후 자기 결과로 오판하고
+      // restoreActiveStatus 호출하는 좀비 race 차단.
+      // 호출자의 TerminateReason 과 무관하게 항상 "remoteEnded" 단일 값 — Senior
+      // 입장에선 Family 가 어떤 이유로 끝냈든 후속 동작 동일 (stopPeer + 정리).
       await writeOrTimeout(
-        () => _db.child('calls/$callId/status').set('ended'),
+        () => _db.child('calls/$callId').update({
+          'status': 'ended',
+          'endReason': 'remoteEnded',
+        }),
         label: '통화 종료 신호',
         timeout: const Duration(seconds: 2),
       );

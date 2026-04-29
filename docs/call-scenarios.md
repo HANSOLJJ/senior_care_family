@@ -270,16 +270,24 @@ sequenceDiagram
 
 ## 10. 종료 사유(endReason) 매트릭스
 
-| endReason | 트리거 | FSM 경유 | UI 메시지 |
-| --------- | ------ | -------- | --------- |
-| `normal` | 사용자 hangUp | terminating | 통화 종료 |
-| `unreachable` | Phase 1 timeout (5s) | connecting→terminating | 응답 없음 |
-| `noAcceptance` | Phase 2 timeout (20s) | connected→terminating | 수신자가 받지 않음 |
-| `iceFailed` | flap>60s or attempts≥5 | reconnecting→terminating | 연결 실패 |
-| `remoteEnded` | 원격 status=ended | connected→terminating | 상대방이 종료 |
-| `remoteBusy` | Senior 다른 통화 중 | connecting→terminating | 통화 중 |
-| `capacityExceeded` | Senior MAX_PEERS 초과 | connecting→terminating | 모니터링 한도 초과 |
-| `otherCallStarted` | 모니터링 중 Senior가 call 수락 → displace | connected→terminating | 모니터링이 종료되었습니다 |
+> ⚠️ **TerminateReason ≠ RTDB endReason**: 본 표의 행 중 일부는 Family `TerminateReason` (Dart enum, 메모리 안에서만) 이고, 일부는 RTDB `/calls/{cid}/endReason` string 값. "RTDB 도달" 컬럼으로 구분. Family 가 RTDB 에 실제로 쓰는 endReason 은 **`"remoteEnded"` 한 가지만** (R2 fix 이후). `unreachable`/`noAcceptance`/`iceFailed` 는 Family 내부 enum 으로만 존재 (UI/로깅용), RTDB 안 닿음.
+
+| endReason | RTDB 도달 | RTDB Writer | 트리거 | FSM 경유 | UI 메시지 |
+| --------- | :---: | --- | ------ | -------- | --------- |
+| `normal` | ✅ | Senior `markEnded`/`hangUp` | Senior 사용자 명시적 hangUp | terminating | 통화 종료 |
+| `unreachable` | ❌ | (Family 내부 enum 만) | Phase 1 timeout (5s) | connecting→terminating | 응답 없음 |
+| `noAcceptance` | ❌ | (Family 내부 enum 만) | Phase 2 timeout (20s) | connected→terminating | 수신자가 받지 않음 |
+| `iceFailed` | ❌ | (Family 내부 enum 만) | flap>60s or attempts≥5 | reconnecting→terminating | 연결 실패 |
+| `remoteEnded` | ✅ | **Family `endCall`** (R2 fix) — 모든 Family 측 종결의 단일 RTDB 값. Senior listener 가 받으면 `_mapEndReason` 으로 `TerminateReason.remoteEnded` 매핑 | Family 측이 종결 (사용자 hangUp / iceFailed / unreachable / 등 어떤 내부 사유든) | connected→terminating | 상대방이 종료 |
+| `remoteBusy` | ✅ | Senior `rejectCall` | Senior 다른 통화 중 | connecting→terminating | 통화 중 |
+| `capacityExceeded` | ✅ | Senior `rejectCall` | Senior MAX_PEERS(3) 초과 | connecting→terminating | 모니터링 한도 초과 |
+| `otherCallStarted` | ✅ | Senior `rejectCall` | 모니터링 중 Senior 가 call 수락 → displace | connected→terminating | 모니터링이 종료되었습니다 |
+| `seniorDisconnect` | ✅ | Server-side onDisconnect (S16 fix) — Senior wifi 단절 시 Firebase 서버가 자동 기록 | Senior wifi 끊김 (자발적 flap 떠받치기 마커) | grace 15s 대기 → 복구 시 무효화 / grace 만료 시 `remoteEnded` 로 종결 | (UI 변경 없음 — grace 동안 재연결 표시 유지) |
+| `userHangup`, `networkOffline`, `upgradeFailed`, `endedByOtherCall` | ❌ | (Family 내부 enum 만) | 다양 — Family `_mapEndReason` 또는 자체 hangUp reason | 다양 | 다양 |
+
+### 왜 Family RTDB 는 "remoteEnded" 한 가지 — TerminateReason vs RTDB endReason
+
+Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안에서만 살음). RTDB 통신용 endReason 은 Family↔Senior 단일 통신 채널 — Senior 입장에선 Family 가 어떤 이유로 끝났든 후속 동작 동일 (`stopPeer` + 정리). 따라서 Family `endCall` 은 호출자의 `TerminateReason` 과 무관하게 **항상 `endReason="remoteEnded"`** 한 값만 RTDB 에 씀. 자세한 layer 분리는 [RTDB_schema.md /calls Writer 매트릭스](RTDB_schema.md) 참조.
 
 ### 10-1. `otherCallStarted` 상세 (1:N displace 절차)
 
@@ -318,6 +326,33 @@ sequenceDiagram
 **Senior 동작**: peers 카운터 3 초과 감지 → `rejectCall(..., CAPACITY_EXCEEDED)` → RTDB `endReason="capacityExceeded"` write.
 
 **Family 동작**: `_mapEndReason("capacityExceeded") → TerminateReason.capacityExceeded` → 다이얼로그 "모니터링 한도 초과" → pop.
+
+### 10-4. `seniorDisconnect` 상세 (KEP WiFi flap 떠받치기, S16 fix)
+
+**발생 조건**: Senior wifi 자발적 drop (KEP M10VSA2 MTK WiFi `reason=0 locally_generated=1`) 또는 일반 wifi 단절. Senior 측 server-side `onDisconnect` 핸들러가 자동 발화.
+
+**Senior server-side 동작** ([SignalingClient.kt:registerDisconnectCleanup](../../Senior/app/src/main/java/com/seniorcare/senior/webrtc/SignalingClient.kt)):
+
+- `callRef.onDisconnect().updateChildren({status:"ended", endReason:"seniorDisconnect"})` — 노드 삭제 대신 임시 마커
+- Firebase 서버가 Senior socket 끊김 감지 시 자동 발화
+
+**Senior 자기 측 동작** (wifi 복구 후, [MonitoringSession.kt:1092](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L1092)):
+
+자기 onDisconnect 결과 (status="ended" + endReason="seniorDisconnect") 를 받으면:
+
+1. `cancelDisconnectCleanup()` — `onDisconnect` 핸들러 취소
+2. `registerDisconnectCleanup()` — 다음 단절 대비 재등록
+3. `restoreActiveStatus()` — `status="answered"` + `endReason=null` 로 복원
+
+**Family 동작** ([webrtc_service.dart:_callEndSub](../lib/services/call/webrtc_service.dart)):
+
+`endReason="seniorDisconnect"` 수신 시 즉시 hangUp 안 함 → `_seniorDisconnectGraceTimer` 15초 시작.
+
+- grace 만료 전 PC CONNECTED 복귀 시: 통화 유지 (timer 자동 cancel)
+- grace 만료 시 PC CONNECTED 면: 통화 유지
+- grace 만료 시 PC 미복구: `hangUp(remoteEnded)` 종결
+
+**복구 가능 한계**: Senior wifi off 1~4초 → ICE restart 자연 진입으로 복구. 5~12초 → Senior PC keepalive timeout (5s) + STOP_DELAY (7s) 가 ICE restart 보다 먼저 발화 → grace 안에 복구 못하고 `remoteEnded` 종결. 12초 초과 → wifi 복구 전 Senior 자체 종결. 검증 결과는 [ICE_restart_test_result.md S16](./ICE_restart_test_result.md#s16--senior-측-wi-fi-단절) 참조.
 
 ---
 

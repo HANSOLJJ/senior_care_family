@@ -1,4 +1,6 @@
-# Firebase 데이터 스키마 v3
+<!-- markdownlint-disable MD024 MD036 -->
+
+# Firebase 데이터 스키마 v4
 
 ## RTDB
 
@@ -10,7 +12,7 @@
 - `/devices/{did}` — Senior 기기의 모든 정보 (유일한 출처)
 - `/families/{fid}/devices/{did}: true` — 소속 목록만 (상세 정보 없음)
 - `/users/{uid}` — Family 사용자 정보 (기기 등록 안 함)
-- **onDisconnect는 `/devices/` 에만** — `/families/` 경로에 onDisconnect 없음 → 고아 부활 불가능
+- **onDisconnect는 `/devices/` 와 `/calls/` 에만** — `/families/` 경로엔 onDisconnect 없음 → 고아 부활 불가능
 
 ### deviceId 생성 규칙
 
@@ -25,217 +27,373 @@
 - 나머지 경로(devices, calls, members, photoSync, reminders)의 `_label` 은 DEPRECATED
 - `_`가 알파벳 순 최상위 → Firebase Console에서 노드 열면 첫 번째로 보임
 
----
+### 전체 트리
 
 ```text
 Firebase RTDB
-│
-├── /devices/{deviceId}/                        # Senior 기기 전용 레지스트리
-│   ├── _label: string                          # ⚠️ DEPRECATED — 신규 미생성. 기존 데이터만 잔존.
-│   ├── role: "senior"                          # 항상 senior (Family는 등록 안 함)
-│   ├── model: string                           # ⚠️ DEPRECATED — name 으로 통일. 기존 데이터만 잔존.
-│   ├── name: string                            # 표시 이름 (기기 모델명)
-│   ├── lastSeen: timestamp                     # onDisconnect → ServerValue.TIMESTAMP
-│   ├── connections/                            # Connection List (race-free presence)
-│   │   └── {sessionId}: true                   # Senior가 register 시 UUID 생성.
-│   │                                             onDisconnect().removeValue() 예약 → 끊김 시
-│   │                                             자기 child만 제거 → 타 세션 간섭 불가.
-│   │                                             online 판정: hasChildren() == true
-│   ├── familyId: string | null                 # 소속 가족 (페어링 시 설정)
-│   ├── fcmToken: string                        # FCM 푸시 토큰
-│   ├── appVersion: string                      # "1.0"
-│   ├── createdAt: timestamp                    # 최초 등록 시각
-│   ├── storageTotal: number                    # 전체 용량 (bytes)
-│   ├── storageAvailable: number                # 가용 용량 (bytes)
-│   ├── photoCount: number                      # 저장된 사진 수
-│   └── storageUpdatedAt: timestamp             # 스토리지 정보 갱신 시각
-│
-│   Writer: Senior 앱만
-│   Reader: Family 앱 (기기 상세 정보), Cloud Functions
-│   onDisconnect: connections/{sessionId} → remove, lastSeen → timestamp
-│   Presence 판정 (Family): connections.hasChildren()
-│
-├── /calls/{callId}/                            # 영상통화 시그널링 (임시, 통화 종료 후 삭제)
-│   ├── _label: string                          # ⚠️ DEPRECATED — 신규 미생성.
-│   ├── callerUid: string                       # 발신자 Firebase Auth UID
-│   ├── callerName: string                      # 발신자 표시 이름
-│   ├── callerDeviceId: string                  # ⚠️ DEPRECATED — callerUid 로 충분. 신규 미생성.
-│   ├── targetDeviceId: string                  # 수신 기기 ID (Senior)
-│   ├── targetFamilyId: string                  # 수신 가족 ID (Security Rules용)
-│   ├── callType: "call" | "monitor"            # call=양방향, monitor=일방향 CCTV
-│   ├── status: "ringing"|"answered"|"connected"|"ended"
-│   │                                           # ringing: Family 가 call 생성 시 초기값 (Family writer)
-│   │                                           # answered: Senior 가 sendAnswer 시 덮어씀 (Senior writer)
-│   │                                           # connected: Family 가 sendAnswer 시 덮어씀 (Family 가 receiver 일 때만 — 현재 미사용)
-│   │                                           # ended: Family 가 hangUp 시 덮어씀 (Family writer)
-│   │                                           # ⚠️ LWW 주의: 빠른 hangUp 시나리오에서 Senior 의 answered 가 Family 의 ended 를 뒤늦게 덮어쓸 수 있음.
-│   │                                           #    Senior 는 sendAnswer 전에 현재 status 확인 필요 (ended 면 answered 쓰지 않음).
-│   ├── endReason: string | null                # Senior writer: "normal" | "remoteBusy" | "capacityExceeded" | "otherCallStarted"
-│   │                                           # Family writer: "iceFailed" | "unreachable" | "noAcceptance" ...
-│   │                                           # 전체 매트릭스: docs/call-scenarios.md §10
-│   ├── seniorAccepted: boolean | null           # Senior 수락 여부 (call 타입)
-│   ├── createdAt: timestamp
-│   ├── offer: { sdp: string, type: string }    # SDP offer (Family → Senior)
-│   ├── answer: { sdp: string, type: string }   # SDP answer (Senior → Family)
-│   ├── callerCandidates/
-│   │   └── {pushId}: { candidate, sdpMid, sdpMLineIndex }
-│   ├── calleeCandidates/
-│   │   └── {pushId}: { candidate, sdpMid, sdpMLineIndex }
-│   ├── upgradeRequest: "call" | null           # 모니터링 → 통화 전환 요청
-│   ├── renegotiateOffer: { sdp, type } | null
-│   ├── renegotiateAnswer: { sdp, type } | null
-│   ├── iceRestartOffer: { sdp, type } | null   # ICE restart offer (Family → Senior)
-│   └── iceRestartAnswer: { sdp, type } | null  # ICE restart answer (Senior → Family)
-│
-│   Writer: Family (offer/candidates/upgradeRequest/renegotiateOffer/iceRestartOffer/status=ringing|ended),
-│           Senior (answer/candidates/seniorAccepted/renegotiateAnswer/iceRestartAnswer/endReason/status=answered)
-│   정리: 통화 종료 후 Family 가 10초 지연 후 삭제 (Senior 가 status=ended 또는 노드 삭제로 dispose 할 시간 확보).
-│         10초 내 Family 앱 종료 시 고아 노드 남음 → cleanupOrphanedData CF 가 매일 정리.
-│
-│   1:N × 1:1 정책 (Senior 측 강제):
-│     - monitor N개 동시 허용 (상한 MAX_PEERS=3, 초과 시 endReason=capacityExceeded)
-│     - call 은 1개 배타 (기존 call 이 있으면 endReason=remoteBusy)
-│     - call 수락 시 기존 monitor peer 들 자동 displace (endReason=otherCallStarted)
-│     - 상세: docs/call-scenarios.md §13
-│
-├── /pairingCodes/{code}: familyId              # 페어링 코드 → 가족 ID 역조회
-│
-│   Writer: Senior (페어링 시작 시)
-│   Reader: Family (페어링 참여 시)
-│
-├── /users/{userId}/                            # Family 앱 사용자 프로필
-│   ├── provider: string                        # ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성.
-│   ├── updatedAt: timestamp                    # ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성.
-│   ├── familyIds/
-│   │   └── {familyId}: true                    # 소속 가족 목록
-│   └── familyNames/
-│       └── {familyId}: string                  # 가족별 별칭 ("부모님")
-│
-│   Writer: Family 앱 (familyIds/familyNames만 active)
-│   Reader: Family 앱
-│   ※ Family 기기는 /devices/에 등록하지 않음
-│   ※ 프로필 정보(name/email/photoUrl)는 Firebase Auth 에서 직접 조회
-│
-└── /families/{familyId}/                       # 가족 그룹
-    ├── _label: string                          # "부모님" (사용자 지정 이름)
-    ├── pairingCode: string                     # 현재 활성 페어링 코드 (6자리)
-    ├── createdAt: timestamp
-    │
-    ├── callStatus/                             # 실시간 통화 상태 (UI 인디케이터용)
-    │   ├── active: boolean
-    │   ├── type: "call" | "monitor"
-    │   ├── callerName: string
-    │   ├── count: number                       # Senior peers.size
-    │   └── startedAt: timestamp
-    │
-    │   Writer: Senior (유일 writer — active=true 설정 + onDisconnect→null)
-    │   Reader: Family (family_detail_screen 통화중 표시)
-    │
-    ├── devices/
-    │   └── {deviceId}: true                    # 소속 기기 목록 (상세 정보 없음!)
-    │                                           # 상세 정보는 /devices/{deviceId}에서 읽기
-    │   Writer: Senior (페어링 시)
-    │   Reader: Family (deviceId 목록 조회 → /devices/{did}에서 상세)
-    │
-    ├── members/
-    │   └── {userId}/
-    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
-    │       ├── name: string                    # 표시 이름 (사용자 지정)
-    │       ├── role: "family"
-    │       ├── provider: "google"|"apple"|"kakao"|"naver"
-    │       ├── photoUrl: string
-    │       └── joinedAt: timestamp
-    │
-    │   Writer: Family 앱 (joinFamily 시)
-    │   Reader: Family 앱, Senior (멤버 수 감지)
-    │
-    ├── photoSync/
-    │   └── {photoId}/
-    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
-    │       ├── fileName: string
-    │       ├── size: number
-    │       ├── checksum: string
-    │       ├── storageUrl: string              # 원본 임시 Storage URL (done 후 삭제)
-    │       ├── storagePath: string | null      # 원본 임시 Storage 경로
-    │       ├── thumbUrl: string                # 썸네일 Storage URL (영구)
-    │       ├── thumbPath: string               # 썸네일 Storage 경로 (삭제용)
-    │       ├── uploadedBy: string              # 업로더 UID
-    │       ├── uploadedByName: string          # ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존.
-    │       ├── createdAt: timestamp
-    │       ├── completedAt: timestamp | null   # 모든 Senior 다운로드 완료 시각
-    │       ├── status: string                  # "pending"|"done"|"expired"
-    │       ├── retryCount: number
-    │       └── downloadedBy/                   # 각 Senior 다운로드 완료 기록
-    │           └── {deviceId}: true
-    │
-    │   Writer: Family (업로드/삭제), Senior (downloadedBy), Cloud Function (만료/Storage)
-    │   ※ thumbnail(base64) 필드 제거 → thumbUrl(Storage URL)로 교체
-    │   ※ "deleted" 상태 제거 → Family가 RTDB 노드를 즉시 remove()
-    │   ※ Family 앱: onValue 구독 + setPersistenceEnabled(true)
-    │   ※   persistence delta sync: 변경분만 수신, 앱 재시작 시 즉시 표시
-    │   ※   로컬 SQLite 캐시: /data/data/com.seniorcare.family/databases/
-    │   ※ Senior 앱: ValueEventListener + setPersistenceEnabled(true)
-    │   ※   onDataChange: RTDB 파일목록 vs 로컬 비교 → 고아 파일 자동 삭제
-    │
-    ├── reminders/
-    │   └── {reminderId}/
-    │       ├── _label: string                  # ⚠️ DEPRECATED — 신규 미생성.
-    │       ├── title: string
-    │       ├── mediaUrl: string
-    │       ├── mediaType: "video" | "audio"
-    │       ├── mediaDuration: number
-    │       ├── mediaDownloaded: boolean        # Senior 미디어 다운로드 완료 여부
-    │       ├── schedule/
-    │       │   ├── time: string                # "HH:mm"
-    │       │   ├── repeat: "daily"|"weekdays"|"weekend"|"custom"|"test_5min"
-    │       │   └── days: [number]              # custom일 때만
-    │       ├── enabled: boolean
-    │       ├── createdBy: string               # 작성자 UID
-    │       ├── createdByName: string           # ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존.
-    │       ├── targetDeviceId: string | null   # ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성.
-    │       ├── targetDeviceName: string | null  # ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성.
-    │       ├── createdAt: timestamp
-    │       └── updatedAt: timestamp
-    │
-    │   Writer: Family (CRUD)
-    │   Reader: Senior (스케줄링 + 미디어 다운로드)
-    │
-    ├── reminderLogs/                           # 스키마만 확정, 구현은 2차
-    │   └── {logId}/
-    │       ├── _label: string
-    │       ├── reminderId: string
-    │       ├── reminderTitle: string
-    │       ├── scheduledAt: timestamp
-    │       ├── triggeredAt: timestamp
-    │       ├── status: "pending"|"confirmed"|"missed"
-    │       ├── confirmedAt: timestamp | null
-    │       ├── missedAt: timestamp | null
-    │       ├── notifiedFamilyAt: timestamp | null
-    │       └── detectionMethod: "face"|"manual"|null
-    │
-    │   Writer: Senior
-    │   Reader: Family
-    │   보존: 90일 (Cloud Function)
-    │
-    └── callHistory/                            # 스키마만 확정, 구현은 2차
-        └── {historyId}/
-            ├── _label: string
-            ├── callId: string
-            ├── callerUid: string
-            ├── callerName: string
-            ├── targetDeviceId: string
-            ├── targetDeviceName: string
-            ├── callType: "call" | "monitor"
-            ├── startedAt: timestamp
-            ├── endedAt: timestamp
-            ├── duration: number
-            ├── endReason: string
-            └── result: string
-
-        Writer: Senior, Family
-        Reader: Family
-        보존: 365일 (Cloud Function)
+├── /devices/{deviceId}              # Senior 기기 레지스트리
+├── /calls/{callId}                  # 영상통화 시그널링 (임시)
+├── /pairingCodes/{code}             # 페어링 코드 → familyId 역조회
+├── /users/{userId}                  # Family 사용자 프로필
+└── /families/{familyId}             # 가족 그룹
+    ├── callStatus                   # 통화중 인디케이터
+    ├── devices                      # 소속 기기 목록
+    ├── members                      # 멤버 목록
+    ├── photoSync                    # 사진 동기화
+    ├── reminders                    # 영상 알림
+    ├── reminderLogs                 # 알림 응답 로그 (2차)
+    └── callHistory                  # 통화 이력 (2차)
 ```
+
+---
+
+## `/devices/{deviceId}`
+
+Senior 기기의 모든 정보를 담는 유일한 출처 (single source of truth). Family 폰은 등록하지 않음.
+
+**책임**
+
+- **Writer**: Senior 앱만
+- **Reader**: Family 앱 (기기 상세 정보), Cloud Functions
+- **onDisconnect**: `connections/{sessionId}` → `removeValue()`, `lastSeen` → `ServerValue.TIMESTAMP`
+- **Presence 판정 (Family)**: `connections.hasChildren() == true`
+
+### 필드
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | ⚠️ DEPRECATED — 신규 미생성. 기존 데이터만 잔존 |
+| `role` | "senior" | 항상 "senior" (Family 는 등록 안 함) |
+| `model` | string | ⚠️ DEPRECATED — `name` 으로 통일. 기존 데이터만 잔존 |
+| `name` | string | 표시 이름 (기기 모델명) |
+| `lastSeen` | timestamp | `onDisconnect` 가 `ServerValue.TIMESTAMP` 로 갱신 |
+| `connections/{sessionId}` | true | Connection List. Senior register 시 UUID 생성. `onDisconnect().removeValue()` 로 자기 child 만 제거 → 타 세션 간섭 불가 |
+| `familyId` | string \| null | 소속 가족 (페어링 시 설정) |
+| `fcmToken` | string | FCM 푸시 토큰 |
+| `appVersion` | string | "1.0" 등 |
+| `createdAt` | timestamp | 최초 등록 시각 |
+| `storageTotal` | number | 전체 용량 (bytes) |
+| `storageAvailable` | number | 가용 용량 (bytes) |
+| `photoCount` | number | 저장된 사진 수 |
+| `storageUpdatedAt` | timestamp | 스토리지 정보 갱신 시각 |
+
+---
+
+## `/calls/{callId}`
+
+영상통화/모니터링 시그널링용 임시 노드. 통화 종료 후 Family 가 10초 지연 후 삭제.
+
+**책임**
+
+- **라이프사이클**: `ringing` → `answered` → `connected` → `ended` → Family 가 10s 후 노드 삭제
+- **정리**: 10초 내 Family 앱 종료 시 고아 노드 잔존 → `cleanupOrphanedData` CF 가 매일 정리
+- **1:N × 1:1 정책 (Senior 측 강제)**:
+  - monitor N개 동시 허용 (상한 `MAX_PEERS=3`, 초과 시 `endReason=capacityExceeded`)
+  - call 은 1개 배타 (기존 call 이 있으면 `endReason=remoteBusy`)
+  - call 수락 시 기존 monitor peer 들 자동 displace (`endReason=otherCallStarted`)
+  - 상세: [docs/call-scenarios.md §13](call-scenarios.md)
+
+### Writer 매트릭스
+
+| Writer | 쓰는 필드 |
+| --- | --- |
+| **Family** | `offer`, `callerCandidates`, `status` (ringing\|ended), `endReason` (remoteEnded), `upgradeRequest`, `renegotiateOffer`, `iceRestartOffer`, `callerUid`, `callerName`, `targetDeviceId`, `targetFamilyId`, `callType`, `createdAt` |
+| **Senior** | `answer`, `calleeCandidates`, `status` (answered), `endReason` (normal\|remoteBusy\|capacityExceeded\|otherCallStarted), `seniorAccepted`, `renegotiateAnswer`, `iceRestartAnswer` |
+| **Server-side onDisconnect** (S16 fix) | `status="ended"` + `endReason="seniorDisconnect"` (Senior wifi 끊김 시 Firebase 서버가 자동 기록하는 임시 마커) |
+
+> ⚠️ Family 내부 `TerminateReason.iceFailed` / `unreachable` / `noAcceptance` 등은 **Dart enum 값이며 RTDB endReason 에 도달하지 않음** (Family UX 매핑 전용). RTDB 에 실제로 쓰이는 Family endReason 은 `"remoteEnded"` 한 가지 (R2 fix 이후 도입). 매핑 상세는 [call-scenarios.md §10](call-scenarios.md).
+
+### 필드 명세
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | ⚠️ DEPRECATED — 신규 미생성 |
+| `callerUid` | string | 발신자 Firebase Auth UID |
+| `callerName` | string | 발신자 표시 이름 |
+| `callerDeviceId` | string | ⚠️ DEPRECATED — `callerUid` 로 충분. 신규 미생성 |
+| `targetDeviceId` | string | 수신 기기 ID (Senior) |
+| `targetFamilyId` | string | 수신 가족 ID (Security Rules 용) |
+| `callType` | "call" \| "monitor" | call=양방향, monitor=일방향 CCTV |
+| `status` | "ringing" \| "answered" \| "connected" \| "ended" | 라이프사이클 — 별도 표 참조 |
+| `endReason` | string \| null | 종결 사유 — 별도 매트릭스 참조 |
+| `seniorAccepted` | boolean \| null | Senior 수락 여부 (call 타입) |
+| `createdAt` | timestamp | |
+| `offer` | { sdp, type } | SDP offer (Family → Senior) |
+| `answer` | { sdp, type } | SDP answer (Senior → Family) |
+| `callerCandidates/{pushId}` | { candidate, sdpMid, sdpMLineIndex } | Family 측 ICE candidate |
+| `calleeCandidates/{pushId}` | { candidate, sdpMid, sdpMLineIndex } | Senior 측 ICE candidate |
+| `upgradeRequest` | "call" \| null | 모니터링 → 통화 전환 요청 (Family writer) |
+| `renegotiateOffer` | { sdp, type } \| null | 양방향 전환 시 renegotiate offer (Family writer) |
+| `renegotiateAnswer` | { sdp, type } \| null | renegotiate answer (Senior writer) |
+| `iceRestartOffer` | { sdp, type } \| null | ICE restart offer (Family writer) |
+| `iceRestartAnswer` | { sdp, type } \| null | ICE restart answer (Senior writer) |
+
+### `status` 라이프사이클
+
+| 전이 | Writer | 트리거 | 비고 |
+| --- | --- | --- | --- |
+| `null → "ringing"` | Family | `createCall` | 초기값 |
+| `"ringing" → "answered"` | Senior | `sendAnswer` | LWW 주의: 이미 "ended" 면 덮어쓰지 않음 (Senior 측 status 사전 검사 필요) |
+| `"*" → "ended"` (Family) | Family | `hangUp` → `endCall` | `endReason="remoteEnded"` 동반 set (R2 fix) |
+| `"*" → "ended"` (Senior) | Senior | `hangUp` / `markEnded` | `endReason` 동반 set (normal/remoteBusy/...) |
+| `"*" → "ended"` (서버 자동) | onDisconnect | Senior wifi 끊김 | `endReason="seniorDisconnect"` 마커 (S16 fix) |
+
+### `endReason` 매트릭스
+
+| 값 | Writer | 트리거 | Family UX 매핑 (TerminateReason) |
+| --- | --- | --- | --- |
+| `"normal"` | Senior | Senior 사용자 명시적 hangUp | `remoteEnded` |
+| `"remoteBusy"` | Senior | Senior 가 이미 다른 call 진행 중 → 신규 call 거절 | `remoteBusy` |
+| `"capacityExceeded"` | Senior | monitor `MAX_PEERS=3` 초과 → 신규 monitor 거절 | `capacityExceeded` |
+| `"otherCallStarted"` | Senior | call 수락 → 기존 monitor peer 들 displace | `endedByOtherCall` |
+| `"remoteEnded"` | **Family** (R2 fix) | `endCall` (사용자 hangUp 등 모든 Family-측 종결) | `remoteEnded` (자기 콜백은 `_isEnding` 가드로 무시) |
+| `"seniorDisconnect"` | Server-side onDisconnect (S16 fix) | Senior wifi 끊김 시 Firebase 서버가 자동 기록 | Family: grace 15s 대기 → PC CONNECTED 면 통화 유지 / 만료 시 hangUp(remoteEnded). Senior: wifi 복구 후 자기 결과 무시 + `restoreActiveStatus` 로 endReason=null 복원 |
+
+### S16/R2 fix 보충
+
+- **S16 (`seniorDisconnect` 마커)**: Senior wifi 자발적 2~3초 drop 케이스에 통화를 유지하기 위한 메커니즘. Senior server-side onDisconnect 가 노드를 삭제하지 않고 임시 종결 마커만 남김 → Family grace + Senior 자기 결과 무시로 통화 떠받침
+- **R2 (Family `remoteEnded` 도입)**: Family hangUp 이 endReason 을 명시적으로 쓰지 않으면 Senior 측 stale `seniorDisconnect` 마커가 잔존 → Senior 가 자기 결과로 오판하고 `restoreActiveStatus` 호출 → 좀비 통화 화면. Family endCall 이 endReason="remoteEnded" 도 같이 쓰면 Senior 가 stale 마커 안 봄
+
+---
+
+## `/pairingCodes/{code}`
+
+페어링 코드 → familyId 역조회.
+
+**책임**
+
+- **Writer**: Senior (페어링 시작 시)
+- **Reader**: Family (페어링 참여 시)
+
+### 필드
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| 노드 자체 | string | familyId 값 (예: `"f-abc123"`) |
+
+---
+
+## `/users/{userId}`
+
+Family 앱 사용자 프로필.
+
+**책임**
+
+- **Writer**: Family 앱 (`familyIds` / `familyNames` 만 active)
+- **Reader**: Family 앱
+- ※ Family 기기는 `/devices/` 에 등록하지 않음
+- ※ 프로필 정보 (name/email/photoUrl) 는 Firebase Auth 에서 직접 조회
+
+### 필드
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `provider` | string | ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성 |
+| `updatedAt` | timestamp | ⚠️ DEPRECATED — 레거시 잔존. 신규 미생성 |
+| `familyIds/{familyId}` | true | 소속 가족 목록 |
+| `familyNames/{familyId}` | string | 가족별 별칭 (예: "부모님") |
+
+---
+
+## `/families/{familyId}`
+
+가족 그룹 메타 + 하위 컬렉션.
+
+**책임** (루트 필드)
+
+- **Writer**: Family (생성/별칭 갱신)
+- **Reader**: Family, Senior
+
+### 필드 (루트)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | "부모님" 등 사용자 지정 이름 |
+| `pairingCode` | string | 현재 활성 페어링 코드 (6자리) |
+| `createdAt` | timestamp | |
+
+---
+
+### `/families/{fid}/callStatus`
+
+실시간 통화 상태 (UI 인디케이터용).
+
+**책임**
+
+- **Writer**: Senior (유일 writer — `active=true` 설정 + `onDisconnect → null`)
+- **Reader**: Family (`family_detail_screen` 통화중 표시)
+
+#### 필드
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `active` | boolean | 통화 중 여부 |
+| `type` | "call" \| "monitor" | 통화 종류 |
+| `callerName` | string | 발신자 표시 이름 |
+| `count` | number | Senior peers.size |
+| `startedAt` | timestamp | |
+
+---
+
+### `/families/{fid}/devices`
+
+소속 기기 목록 (상세 정보 없음 — 상세는 `/devices/{did}` 에서 조회).
+
+**책임**
+
+- **Writer**: Senior (페어링 시)
+- **Reader**: Family (deviceId 목록 조회 → `/devices/{did}` 에서 상세)
+
+#### 필드
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `{deviceId}` | true | 소속 기기 플래그 (상세 정보 없음!) |
+
+---
+
+### `/families/{fid}/members`
+
+가족 멤버 목록.
+
+**책임**
+
+- **Writer**: Family 앱 (`joinFamily` 시)
+- **Reader**: Family 앱, Senior (멤버 수 감지)
+
+#### 필드 (`/{userId}` 하위)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | ⚠️ DEPRECATED — 신규 미생성 |
+| `name` | string | 표시 이름 (사용자 지정) |
+| `role` | "family" | |
+| `provider` | "google" \| "apple" \| "kakao" \| "naver" | 로그인 제공자 |
+| `photoUrl` | string | |
+| `joinedAt` | timestamp | |
+
+---
+
+### `/families/{fid}/photoSync`
+
+사진 동기화 메타.
+
+**책임**
+
+- **Writer**: Family (업로드/삭제), Senior (`downloadedBy`), Cloud Function (만료/Storage)
+- **Reader**: Family, Senior
+- ※ thumbnail (base64) 필드 제거 → `thumbUrl` (Storage URL) 로 교체
+- ※ "deleted" 상태 제거 → Family 가 RTDB 노드를 즉시 `remove()`
+- ※ Family 앱: `onValue` 구독 + `setPersistenceEnabled(true)` (delta sync)
+- ※ Senior 앱: `ValueEventListener` + `setPersistenceEnabled(true)` (고아 파일 자동 삭제)
+
+#### 필드 (`/{photoId}` 하위)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | ⚠️ DEPRECATED — 신규 미생성 |
+| `fileName` | string | |
+| `size` | number | bytes |
+| `checksum` | string | |
+| `storageUrl` | string | 원본 임시 Storage URL (done 후 삭제) |
+| `storagePath` | string \| null | 원본 임시 Storage 경로 |
+| `thumbUrl` | string | 썸네일 Storage URL (영구) |
+| `thumbPath` | string | 썸네일 Storage 경로 (삭제용) |
+| `uploadedBy` | string | 업로더 UID |
+| `uploadedByName` | string | ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존 |
+| `createdAt` | timestamp | |
+| `completedAt` | timestamp \| null | 모든 Senior 다운로드 완료 시각 |
+| `status` | "pending" \| "done" \| "expired" | |
+| `retryCount` | number | |
+| `downloadedBy/{deviceId}` | true | 각 Senior 다운로드 완료 기록 |
+
+---
+
+### `/families/{fid}/reminders`
+
+영상/오디오 알림 스케줄.
+
+**책임**
+
+- **Writer**: Family (CRUD)
+- **Reader**: Senior (스케줄링 + 미디어 다운로드)
+
+#### 필드 (`/{reminderId}` 하위)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | ⚠️ DEPRECATED — 신규 미생성 |
+| `title` | string | |
+| `mediaUrl` | string | |
+| `mediaType` | "video" \| "audio" | |
+| `mediaDuration` | number | |
+| `mediaDownloaded` | boolean | Senior 미디어 다운로드 완료 여부 |
+| `schedule.time` | string | "HH:mm" |
+| `schedule.repeat` | "daily" \| "weekdays" \| "weekend" \| "custom" \| "test_5min" | |
+| `schedule.days` | [number] | custom 일 때만 |
+| `enabled` | boolean | |
+| `createdBy` | string | 작성자 UID |
+| `createdByName` | string | ⚠️ DEPRECATED — 신규 미생성. 빈 문자열 잔존 |
+| `targetDeviceId` | string \| null | ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성 |
+| `targetDeviceName` | string \| null | ⚠️ DEPRECATED — 미구현 placeholder. 신규 미생성 |
+| `createdAt` | timestamp | |
+| `updatedAt` | timestamp | |
+
+---
+
+### `/families/{fid}/reminderLogs` (2차 — 스키마만 확정)
+
+알림 응답 로그.
+
+**책임**
+
+- **Writer**: Senior
+- **Reader**: Family
+- **보존**: 90일 (Cloud Function)
+
+#### 필드 (`/{logId}` 하위)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | |
+| `reminderId` | string | |
+| `reminderTitle` | string | |
+| `scheduledAt` | timestamp | |
+| `triggeredAt` | timestamp | |
+| `status` | "pending" \| "confirmed" \| "missed" | |
+| `confirmedAt` | timestamp \| null | |
+| `missedAt` | timestamp \| null | |
+| `notifiedFamilyAt` | timestamp \| null | |
+| `detectionMethod` | "face" \| "manual" \| null | |
+
+---
+
+### `/families/{fid}/callHistory` (2차 — 스키마만 확정)
+
+통화 이력.
+
+**책임**
+
+- **Writer**: Senior, Family
+- **Reader**: Family
+- **보존**: 365일 (Cloud Function)
+
+#### 필드 (`/{historyId}` 하위)
+
+| 필드 | 타입 | 설명 |
+| --- | --- | --- |
+| `_label` | string | |
+| `callId` | string | |
+| `callerUid` | string | |
+| `callerName` | string | |
+| `targetDeviceId` | string | |
+| `targetDeviceName` | string | |
+| `callType` | "call" \| "monitor" | |
+| `startedAt` | timestamp | |
+| `endedAt` | timestamp | |
+| `duration` | number | |
+| `endReason` | string | |
+| `result` | string | |
 
 ---
 
@@ -246,13 +404,13 @@ Firebase RTDB
 ```text
 families/
   {familyId}/
-    temp/                                       # 사진 원본 임시 버퍼 (Senior 다운로드 후 삭제)
+    temp/                            # 사진 원본 임시 버퍼 (Senior 다운로드 후 삭제)
       {photoId}.jpg
-    thumbs/                                     # 사진 썸네일 영구 저장 (400×400px, ~100KB)
+    thumbs/                          # 사진 썸네일 영구 저장 (400×400px, ~100KB)
       {photoId}.jpg
     reminders/
       {reminderId}/
-        media.mp4                               # 영상 알림 미디어
+        media.mp4                    # 영상 알림 미디어
 ```
 
 ### 만료 정책
@@ -266,55 +424,21 @@ families/
 
 ---
 
-## Cloud Functions 와치독 (cleanupOrphanedData)
+## Cloud Functions 와치독 — `cleanupOrphanedData`
 
 매일 새벽 3시 (KST) 실행. 수동: `cleanupOrphanedDataManual` HTTP 호출.
 
-```text
-Step 1: 유령 디바이스 정리
-  /devices/ → !hasConnections + lastSeen 7일 경과 → 삭제
-  → 해당 /families/{fid}/devices/{did}도 삭제
-  (connections: Senior register 시 /devices/{did}/connections/{sessionId} 기록,
-   끊김 시 onDisconnect().removeValue()로 자동 제거)
-
-Step 2: 가족 내 유령 디바이스 정리
-  /families/{fid}/devices/{did} → /devices/{did} 없거나 familyId 불일치 → 삭제
-
-Step 3: 고아 가족 정리
-  /families/{fid} → members 0명 + devices 0명 → 삭제 (pairingCode도)
-
-Step 4: 고아 페어링 코드 정리
-  /pairingCodes/{code} → familyId가 /families/에 없음 → 삭제
-
-Step 5: 고아 유저 참조 정리
-  /users/{uid}/familyIds/{fid} → familyId가 /families/에 없음 → familyIds + familyNames 삭제
-```
+| Step | 대상 | 조건 | 처리 |
+| --- | --- | --- | --- |
+| 1 | `/devices/{did}` | `!hasConnections` + `lastSeen` 7일 경과 | 삭제 + `/families/{fid}/devices/{did}` 삭제 |
+| 2 | `/families/{fid}/devices/{did}` | `/devices/{did}` 없거나 `familyId` 불일치 | 삭제 |
+| 3 | `/families/{fid}` | members 0명 + devices 0명 | 삭제 (pairingCode 도) |
+| 4 | `/pairingCodes/{code}` | `familyId` 가 `/families/` 에 없음 | 삭제 |
+| 5 | `/users/{uid}/familyIds/{fid}` | `familyId` 가 `/families/` 에 없음 | `familyIds` + `familyNames` 삭제 |
 
 ---
 
-## v2 → v3 변경 요약
-
-| 변경 | 내용 |
-| --- | --- |
-| `/families/{fid}/devices/{did}` | 상세 정보 제거 → `true` (목록 플래그만) |
-| `/devices/{did}` | storageTotal/Available/photoCount 이동 (기존 families에서) |
-| onDisconnect | `/families/` 경로에서 완전 제거 → `/devices/`에만 |
-| Family 기기 등록 | `/devices/`에 등록하지 않음 → `/users/{uid}`로만 관리 |
-| `registerDevice()` | Family `app_config.dart`에서 삭제 |
-| Senior `onCreate()` | RTDB familyId 검증 추가 (고아 방지) |
-
-## v3 → v4 변경 요약 (Connection List 도입, `online` 필드 제거)
-
-| 변경 | 내용 |
-| --- | --- |
-| `/devices/{did}/connections/{sessionId}` | 신규. Senior 앱 프로세스 세션별 entry. `onDisconnect().removeValue()`로 자기 child만 제거 → onDisconnect race 해소. |
-| `/devices/{did}/online` | **REMOVED**. 단일 boolean + `onDisconnect().setValue(false)` 구조가 stale ghost onDisconnect race에 취약. Family는 `connections.hasChildren()` 으로 판정. |
-| Cloud Functions `cleanupOrphanedData` | orphan 판정 조건을 `!hasConnections && lastSeen 7일`로 전환 (기존 `!online && lastSeen 7일`). |
-| Senior `DeviceRegistration.register()` | `sessionId = UUID.randomUUID()` 매번 생성 / `.info/connected=true` 콜백에서 atomic `updateChildren`으로 `connections` 서브트리 통째 교체 + lastSeen 동반 갱신 / onDisconnect를 data write 이전에 등록 (Firebase 공식 가이드). |
-
-**Family 앱 마이그레이션 이력**: [presence_migration_handover.md](presence_migration_handover.md) — 본 v4 배포로 마이그레이션 완료.
-
-### 사진 전송 라이프사이클
+## 사진 전송 라이프사이클
 
 ```text
 Family 업로드     → 원본: families/{fid}/temp/{photoId}.jpg (임시)
@@ -322,11 +446,46 @@ Family 업로드     → 원본: families/{fid}/temp/{photoId}.jpg (임시)
                   → RTDB: thumbUrl + status: "pending"
 Senior 저장 완료  → downloadedBy/{deviceId}: true
 Cloud Function    → 모든 Senior 완료 → temp Storage 삭제 + status: "done"
-                  → thumbPath/storagePath 필드 제거 (thumbUrl은 유지)
+                  → thumbPath/storagePath 필드 제거 (thumbUrl 은 유지)
 만료 (7일)       → status: "expired" + temp Storage 삭제 (Cloud Function)
-                  → thumbs Storage도 삭제
+                  → thumbs Storage 도 삭제
 RTDB 정리 (37일) → RTDB 항목 완전 삭제 (Cloud Function)
 Family 삭제 요청  → RTDB 노드 즉시 remove()
-                  → Cloud Function(onPhotoDeleted, onDelete 트리거): thumbs Storage 삭제
+                  → Cloud Function (onPhotoDeleted, onDelete 트리거): thumbs Storage 삭제
                   → Senior: onDataChange → 로컬 파일 자동 삭제 (오프라인 중이어도 재연결 시)
 ```
+
+---
+
+## 버전 변경 이력
+
+### v2 → v3
+
+| 변경 | 내용 |
+| --- | --- |
+| `/families/{fid}/devices/{did}` | 상세 정보 제거 → `true` (목록 플래그만) |
+| `/devices/{did}` | `storageTotal/Available/photoCount` 이동 (기존 families 에서) |
+| onDisconnect | `/families/` 경로에서 완전 제거 → `/devices/` 에만 |
+| Family 기기 등록 | `/devices/` 에 등록하지 않음 → `/users/{uid}` 로만 관리 |
+| `registerDevice()` | Family `app_config.dart` 에서 삭제 |
+| Senior `onCreate()` | RTDB familyId 검증 추가 (고아 방지) |
+
+### v3 → v4 (Connection List 도입, `online` 필드 제거)
+
+| 변경 | 내용 |
+| --- | --- |
+| `/devices/{did}/connections/{sessionId}` | 신규. Senior 앱 프로세스 세션별 entry. `onDisconnect().removeValue()` 로 자기 child 만 제거 → onDisconnect race 해소 |
+| `/devices/{did}/online` | **REMOVED**. 단일 boolean + `onDisconnect().setValue(false)` 가 stale ghost onDisconnect race 에 취약. Family 는 `connections.hasChildren()` 으로 판정 |
+| `cleanupOrphanedData` | orphan 판정을 `!hasConnections && lastSeen 7일` 로 전환 |
+| Senior `DeviceRegistration.register()` | `sessionId = UUID.randomUUID()` 매번 생성 / `.info/connected=true` 콜백에서 atomic `updateChildren` 으로 `connections` 서브트리 통째 교체 + `lastSeen` 동반 갱신 / onDisconnect 를 data write 이전에 등록 (Firebase 공식 가이드) |
+
+**Family 앱 마이그레이션 이력**: [presence_migration_handover.md](presence_migration_handover.md) — 본 v4 배포로 마이그레이션 완료.
+
+### v4 → 현재 (S16 + R2 fix)
+
+| 변경 | 내용 |
+| --- | --- |
+| `/calls/{cid}` server-side onDisconnect | (S16) 노드 삭제 → `status="ended"` + `endReason="seniorDisconnect"` 임시 마커. Senior wifi 자발적 drop 시 통화 떠받치기 |
+| `/calls/{cid}` Senior `restoreActiveStatus` | (S16) wifi 복구 후 자기 마커 무시 + `status="answered"`/`endReason=null` 복원 |
+| `/calls/{cid}` Family `endCall` | (R2) `status="ended"` 만 → `status="ended"` + `endReason="remoteEnded"` 동반 set. Family 가 endReason RTDB writer 로 첫 도입 |
+| `/calls/{cid}` Senior `restoreActiveStatus` | (R2) `updateChildren` → `runTransaction` 가드. status/endReason 이 자기 마커와 일치할 때만 복원 |

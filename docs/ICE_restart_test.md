@@ -482,7 +482,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### R2. answered 가 ended 를 LWW 덮어쓰기 방지 (Senior transaction)
+### R2. answered 가 ended 를 LWW(Last Write Wins race) 덮어쓰기 방지 (Senior transaction)
 
 **과거 이슈**: Family 가 hangUp 으로 status=ended 쓴 직후 Senior 가 sendAnswer 로 status=answered 덮어씀 → Senior 자신의 listener 가 ended 못 받음.
 
