@@ -443,6 +443,8 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
 
   /// (`Method`) 재시도 — WebRtcService 재생성 + 모든 상태/타이머 리셋 + 발신 재시작
   void _restartCall() {
+    // networkLost SnackBar ("다시 걸기") 가 새 통화 화면에 잔재로 보이는 race 차단
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     _phase1Timer?.cancel();
     _phase2Timer?.cancel();
     _countdownTimer?.cancel();
