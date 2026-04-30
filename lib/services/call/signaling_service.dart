@@ -245,14 +245,21 @@ class SignalingService {
 
   /// (`Method`, async) 통화 응답 시 onDisconnect 설정 (비정상 종료 대비)
   ///
-  /// 앱이 비정상 종료되면 RTDB가 자동으로 통화 노드를 삭제.
+  /// 앱이 비정상 종료 (wifi 끊김 / 앱 크래시) 되면 RTDB가 자동으로 통화 노드에 마커 set.
+  /// 노드 삭제 (`.remove()`) 가 아닌 마커 (`.update()`) 인 이유 — 짧은 wifi flap 에서도
+  /// Senior 가 grace 진입해서 ICE restart 떠받칠 시간 확보 (plan A — S16 mirror).
+  /// Stub 잔존 시 Senior STOP_DELAY (7s) 가 stopPeer + removeValue (2s 후) 로 정리,
+  /// edge case 는 CF cleanupOrphanedData 가 5분 grace 후 정리.
   /// - **Params**:
   ///   - [callId] — 통화 ID
-  /// - **Side Effects**: RTDB onDisconnect 핸들러 등록
+  /// - **Side Effects**: RTDB onDisconnect 핸들러 등록 (status="ended", endReason="familyDisconnect")
   /// - **호출**: WebRtcService.answerCall, makeCall, startMonitoring, startCall
   Future<void> setCallCleanupOnDisconnect(String callId) async {
-    await _db.child('calls/$callId').onDisconnect().remove();
-    print('시그널링: onDisconnect 설정 callId=$callId');
+    await _db.child('calls/$callId').onDisconnect().update({
+      'status': 'ended',
+      'endReason': 'familyDisconnect',
+    });
+    print('시그널링: onDisconnect 마커 설정 callId=$callId');
   }
 
   /// (`Method`, async) 통화 종료 — status="ended" + callStatus 초기화

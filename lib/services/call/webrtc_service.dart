@@ -89,13 +89,11 @@ class WebRtcService {
 
   // ─── 타이머 / 구독 ───
 
-  /// 연결 끊김 감지 후 grace 타이머 (만료 시 ICE restart 트리거)
+  /// 연결 끊김 감지 후 grace 타이머 (만료 시 ICE restart 1회 시도 트리거)
   Timer? _disconnectTimer;
 
-  /// CONNECTED 안정 유지 확인 타이머 (만료 시 flap 카운터 리셋)
-  Timer? _stableTimer;
-
-  /// ICE restart offer 전송 후 answer 수신 대기 타이머 (만료 시 _iceRestartInProgress 리셋 + 재시도)
+  /// ICE restart offer 전송 후 answer 수신 대기 타이머. 1-shot 정책 — 만료 시
+  /// 즉시 networkLost 종결 (재시도 안 함).
   Timer? _iceRestartAnswerTimer;
 
   /// AEC(에코 제거) 메트릭 로깅 타이머 (5초 간격)
@@ -134,14 +132,9 @@ class WebRtcService {
 
   // ─── ICE Restart 상태 ───
 
-  /// ICE restart 진행 중 여부 (중복 트리거 방지). setRemote(answer) 완료 finally에서 reset.
+  /// ICE restart 진행 중 여부 (1-shot 정책 — 한 번 시도 후 결과 결정될 때까지 유지).
+  /// setRemote(answer) 완료 finally 또는 timeout/실패 종결 시점에 reset.
   bool _iceRestartInProgress = false;
-
-  /// 누적 ICE restart 시도 횟수. CONNECTED 안정 5초 유지 시 0으로 리셋.
-  int _iceRestartAttempts = 0;
-
-  /// 최초 DISCONNECTED 진입 시각(ms). flap window 계산용. CONNECTED 안정 시 null.
-  int? _flapWindowStart;
 
   /// 재연결 진행 여부 ValueNotifier — MonitoringScreen이 ValueListenableBuilder로 구독.
   final ValueNotifier<bool> isReconnecting = ValueNotifier(false);
@@ -152,11 +145,8 @@ class WebRtcService {
 
   // ─── 상수 ───
 
-  static const _graceMs = 4000;             // DISCONNECTED → ICE restart trigger 까지 대기
-  static const _maxFlapWindowMs = 60000;    // 최초 disconnect 이후 세션 상한
-  static const _stableResetMs = 5000;       // CONNECTED 유지 시 flap 카운터 리셋
-  static const _maxIceRestartAttempts = 5;
-  static const _iceRestartAnswerTimeoutMs = 10000; // offer 전송 후 answer 대기 시간
+  static const _graceMs = 4000;             // DISCONNECTED → ICE restart 1회 시도 까지 대기
+  static const _iceRestartAnswerTimeoutMs = 10000; // offer 전송 후 answer 대기 시간 (만료 시 즉시 종결)
 
   // ─── 콜백 ───
 
@@ -411,21 +401,33 @@ class WebRtcService {
     _pendingCandidates.clear();
   }
 
-  /// (`Callback`) PeerConnection 상태 변화 — DISCONNECTED/FAILED 시 ICE restart 트리거
+  /// (`Callback`) PeerConnection 상태 변화 — DISCONNECTED/FAILED 시 ICE restart 1회 시도
   ///
-  /// - DISCONNECTED: grace 4초 대기 후 [_triggerIceRestart] (이미 진행 중이면 skip)
-  /// - FAILED: 즉시 [_triggerIceRestart]
-  /// - CONNECTED: grace/state 리셋, 5초 안정 유지 시 flap 카운터 리셋
+  /// - DISCONNECTED: 즉시 FSM `connected → reconnecting` 전이 (사용자 인지 오버레이 표시),
+  ///   grace 4초 동안 PC 자체 keepalive 자가 복구 기회. 만료 시 [_triggerIceRestart]
+  /// - FAILED: 즉시 reconnecting 전이 + [_triggerIceRestart] (grace 없이)
+  /// - CONNECTED: 모든 grace/timer 정리, reconnecting → connected 복귀
   void _onPeerConnectionStateChanged(RTCPeerConnectionState state) {
     print('WebRTC: 연결 상태 = $state');
     if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
       if (_iceRestartInProgress) return;
+      // 사용자 즉시 인지 — DISCONNECTED 감지 즉시 reconnecting 전이로 오버레이 표시
+      if (_fsm.phase.value == CallPhase.connected ||
+          _fsm.phase.value == CallPhase.upgrading) {
+        _fsm.to(CallPhase.reconnecting, reason: 'pc_disconnected');
+      }
       isReconnecting.value = true;
       _disconnectTimer?.cancel();
       _disconnectTimer = Timer(const Duration(milliseconds: _graceMs), () {
+        print('WebRTC: [DEBUG] _disconnectTimer fired (grace ${_graceMs}ms 만료) → _triggerIceRestart 호출');
         _triggerIceRestart();
       });
     } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+      if (_iceRestartInProgress) return;
+      if (_fsm.phase.value == CallPhase.connected ||
+          _fsm.phase.value == CallPhase.upgrading) {
+        _fsm.to(CallPhase.reconnecting, reason: 'pc_failed');
+      }
       _disconnectTimer?.cancel();
       isReconnecting.value = true;
       _triggerIceRestart();
@@ -438,61 +440,38 @@ class WebRtcService {
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = null;
       isReconnecting.value = false;
-      // reconnecting → connected 복귀 (ICE restart 후)
+      // reconnecting → connected 복귀 (ICE restart 성공 또는 PC 자가 복구)
       if (_fsm.phase.value == CallPhase.reconnecting) {
         _fsm.to(CallPhase.connected, reason: 'ice_restored');
       }
-      _stableTimer?.cancel();
-      _stableTimer = Timer(const Duration(milliseconds: _stableResetMs), () {
-        if (_peerConnection?.connectionState ==
-            RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-          _iceRestartAttempts = 0;
-          _flapWindowStart = null;
-        }
-      });
     }
   }
 
-  // ─── ICE Restart 트리거 ───
+  // ─── ICE Restart 트리거 (1-shot 정책) ───
 
-  /// (`Method`, async) ICE restart offer 생성 + 전송
+  /// (`Method`, async) ICE restart offer 생성 + 전송 — 1회만 시도, 실패 시 즉시 networkLost 종결.
   ///
-  /// flap window/attempts 한도 체크 후 `pc.restartIce() + createOffer + setLocalDescription`,
-  /// SignalingService를 통해 RTDB `iceRestartOffer` 노드에 SDP 기록.
-  /// - **Side Effects**: `_iceRestartInProgress=true`, `_iceRestartAttempts++`, RTDB write.
-  ///   한도 초과 시 [hangUp] + `onCallEnded` 호출.
+  /// 정책: 한 번 시도해서 실패 (answer 미수신 / createOffer 실패 / RTDB write 실패) 하면
+  /// 재시도하지 않고 [hangUp(networkLost)] 로 즉시 종결. 사용자 UX 는 SnackBar +
+  /// "다시 걸기" 버튼으로 1탭 재발신을 유도.
   /// - **호출**: [_onPeerConnectionStateChanged] (DISCONNECTED grace 만료 / FAILED 즉시)
   Future<void> _triggerIceRestart() async {
-    if (_isEnding) return;
-    if (_iceRestartInProgress) return;
-    if (_peerConnection == null || _callId == null) return;
-
-    final now = DateTime.now().millisecondsSinceEpoch;
-    _flapWindowStart ??= now;
-    if (now - _flapWindowStart! > _maxFlapWindowMs) {
-      print('WebRTC: flap window($_maxFlapWindowMs ms) 초과 → iceFailed 종결');
-      await hangUp(reason: TerminateReason.iceFailed);
-      onCallEnded?.call();
+    print('WebRTC: [DEBUG] _triggerIceRestart 진입 — _isEnding=$_isEnding, _iceRestartInProgress=$_iceRestartInProgress, _peerConnection==null:${_peerConnection == null}, _callId==null:${_callId == null}, pcState=${_peerConnection?.connectionState}');
+    if (_isEnding) {
+      print('WebRTC: [DEBUG] _triggerIceRestart 가드 막힘 — _isEnding=true');
       return;
     }
-    if (_iceRestartAttempts >= _maxIceRestartAttempts) {
-      print('WebRTC: ICE restart 한도($_maxIceRestartAttempts) 초과 → iceFailed 종결');
-      await hangUp(reason: TerminateReason.iceFailed);
-      onCallEnded?.call();
+    if (_iceRestartInProgress) {
+      print('WebRTC: [DEBUG] _triggerIceRestart 가드 막힘 — _iceRestartInProgress=true');
+      return;
+    }
+    if (_peerConnection == null || _callId == null) {
+      print('WebRTC: [DEBUG] _triggerIceRestart 가드 막힘 — pc 또는 callId null');
       return;
     }
 
-    // 첫 진입 시 connected → reconnecting 전이 (MonitoringScreen 배너용)
-    if (_fsm.phase.value == CallPhase.connected ||
-        _fsm.phase.value == CallPhase.upgrading) {
-      _fsm.to(CallPhase.reconnecting, reason: 'ice_restart_start');
-    }
-
-    _iceRestartAttempts++;
     _iceRestartInProgress = true;
-    // attempt 시작 print — sendIceRestartOffer 가 NetworkException throw 해도
-    // catch 의 실패 로그에서 attempt 번호 매칭 가능하도록 try 진입 직전에 출력.
-    print('WebRTC: ICE restart attempt=$_iceRestartAttempts 시작');
+    print('WebRTC: ICE restart 1회 시도 시작');
 
     try {
       await _peerConnection!.restartIce();
@@ -502,51 +481,31 @@ class WebRtcService {
       await _peerConnection!.setLocalDescription(offer);
       if (_isEnding) return;
       // signaling_service.sendIceRestartOffer 가 writeOrTimeout (3s) + onTimeoutCleanup 으로
-      // offline hang / orphan offer 를 모두 방어. 여기서는 별도 timeout 불필요.
+      // offline hang / orphan offer 를 모두 방어.
       await _signaling.sendIceRestartOffer(_callId!, {
         'sdp': offer.sdp,
         'type': offer.type,
       });
-      print('WebRTC: ICE restart offer 전송 성공 (attempt=$_iceRestartAttempts)');
+      print('WebRTC: ICE restart offer 전송 성공');
 
-      // answer 수신 대기 타이머 — 만료 시 _iceRestartInProgress 리셋 + 자동 재시도.
-      // 재시도는 _triggerIceRestart 재호출로, 한도/flap window 자동 체크됨.
+      // answer 수신 대기 타이머 — 만료 시 즉시 종결 (재시도 없음).
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = Timer(
         const Duration(milliseconds: _iceRestartAnswerTimeoutMs),
-        () {
+        () async {
           if (!_iceRestartInProgress) return;
-          print('WebRTC: ICE restart answer 미수신 (${_iceRestartAnswerTimeoutMs}ms) → 재시도 트리거');
           _iceRestartInProgress = false;
-          // 여전히 DISCONNECTED/FAILED면 재시도. CONNECTED 복귀했으면 _triggerIceRestart 초입 가드로 skip.
-          final state = _peerConnection?.connectionState;
-          if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-              state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-            _triggerIceRestart();
-          }
+          print('WebRTC: ICE restart answer 미수신 (${_iceRestartAnswerTimeoutMs}ms) → networkLost 종결');
+          await hangUp(reason: TerminateReason.networkLost);
+          onCallEnded?.call();
         },
       );
     } catch (e) {
-      print('WebRTC: ICE restart 실패: $e');
+      print('WebRTC: ICE restart 실패 → networkLost 종결: $e');
       _iceRestartInProgress = false;
-      // NetworkException (오프라인으로 offer 전송 실패) 시
-      // PC 가 FAILED 로 자연 전환될 때까지 기다리지 않고 직접 재시도 타이머 예약.
-      // WebRTC 내부 DISCONNECTED→FAILED 타이머는 조건부이고 언제 발화할지 보장 안 됨 →
-      // PC 가 계속 DISCONNECTED 로 머물면 _triggerIceRestart 재진입이 없어
-      // flap window 체크(60s 상한)조차 발화 못 하는 구멍.
-      // 10초 후 재진입해서 flap window/attempts 한도 체크가 도달하도록 보장.
-      if (e is NetworkException) {
-        _iceRestartAnswerTimer?.cancel();
-        _iceRestartAnswerTimer = Timer(
-          const Duration(milliseconds: _iceRestartAnswerTimeoutMs),
-          () {
-            final state = _peerConnection?.connectionState;
-            if (state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
-                state == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
-              _triggerIceRestart();
-            }
-          },
-        );
+      if (!_isEnding) {
+        await hangUp(reason: TerminateReason.networkLost);
+        onCallEnded?.call();
       }
     }
   }
@@ -645,6 +604,15 @@ class WebRtcService {
   /// - `"otherCallStarted"` → 다른 가족이 통화 시작하여 내 모니터가 displaced
   /// - `"normal"` / `null` / 기타 → 정상 종료 (remoteEnded)
   TerminateReason _mapEndReason(String? endReason) {
+    // 본질적 ICE 실패 — PC 가 disconnected/failed 였으면 사용자 입장에선 자기 측 네트워크 끊김.
+    // iOS Firebase SDK 가 wifi off 4초 안에 onDisconnect 발화 → Senior stopPeer →
+    // endReason="normal" 송신. iPhone reconnect 후 Family 가 받지만 PC 는 DISCONNECTED 였음.
+    // 이 경우 remoteEnded 가 아닌 networkLost 로 매핑하여 SnackBar "다시 걸기" 버튼 노출.
+    final pcState = _peerConnection?.connectionState;
+    if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected ||
+        pcState == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
+      return TerminateReason.networkLost;
+    }
     switch (endReason) {
       case 'remoteBusy':
         return TerminateReason.remoteBusy;
@@ -719,6 +687,20 @@ class WebRtcService {
           },
         );
         return; // 즉시 hangUp 안 함
+      }
+      // ★★ 자기 측 server-side onDisconnect 결과 (plan A — Family wifi flap).
+      // wifi 복귀 후 reconnect 시 자기 마커를 받음. PC 가 CONNECTED 면 ICE restart 성공
+      // (또는 PC 자가 복구) → 마커 무시하고 통화 유지. PC 가 미복구면 networkLost 종결.
+      if (endReason == 'familyDisconnect') {
+        final pcState = _peerConnection?.connectionState;
+        if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+          print('WebRTC: 자기 familyDisconnect 마커 무시 (PC CONNECTED — 통화 유지)');
+          return;
+        }
+        print('WebRTC: 자기 familyDisconnect 마커 + PC 미복구 → networkLost 종결');
+        hangUp(reason: TerminateReason.networkLost);
+        onCallEnded?.call();
+        return;
       }
       hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
@@ -1077,8 +1059,6 @@ class WebRtcService {
     if (!_fsm.to(CallPhase.terminating, reason: 'hangup:${reason.name}')) return;
     _disconnectTimer?.cancel();
     _disconnectTimer = null;
-    _stableTimer?.cancel();
-    _stableTimer = null;
     _iceRestartAnswerTimer?.cancel();
     _iceRestartAnswerTimer = null;
     _seniorDisconnectGraceTimer?.cancel();
@@ -1097,12 +1077,10 @@ class WebRtcService {
     _iceRestartAnswerSub = null;
     _seniorAcceptedSub = null;
 
-    // ICE restart 상태 리셋
+    // ICE restart 상태 리셋 (1-shot 정책)
     isReconnecting.value = false;
     answerReceived.value = false;
     _iceRestartInProgress = false;
-    _iceRestartAttempts = 0;
-    _flapWindowStart = null;
     _pendingCandidates.clear();
 
     // 자기 hangUp 시 listenForCallEnd 콜백 방지

@@ -142,7 +142,7 @@ void main() {
       });
 
       test('terminate 중복 호출은 no-op — 첫 reason 덮어쓰지 않음', () {
-        fsm.terminate(TerminateReason.iceFailed);
+        fsm.terminate(TerminateReason.networkLost);
         final firstReason = fsm.reason;
         fsm.terminate(TerminateReason.userHangup);
         expect(fsm.reason, firstReason);

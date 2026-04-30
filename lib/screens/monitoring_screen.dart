@@ -326,6 +326,36 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
         );
         Navigator.of(context).pop();
         return;
+      case TerminateReason.networkLost:
+        // ICE restart 1회 시도 실패 또는 PC DISCONNECTED 종결 (iOS wifi flap 포함).
+        // SnackBar 1.5s + "다시 걸기" 액션 → 1탭 재발신. 액션 미탭 시 자동 pop.
+        _dialogShown = true;
+        final messenger = ScaffoldMessenger.of(context);
+        messenger.showSnackBar(SnackBar(
+          content: const Text('연결 불안정으로 통화가 종료되었습니다'),
+          duration: const Duration(milliseconds: 1500),
+          backgroundColor: Colors.black87,
+          action: SnackBarAction(
+            label: '다시 걸기',
+            textColor: Colors.lightBlueAccent,
+            onPressed: () {
+              if (!mounted) return;
+              // _dialogShown=false 로 자동 pop 차단 — _restartCall 이 같은 화면에서 새 통화 발신
+              _dialogShown = false;
+              _restartCall();
+            },
+          ),
+        ));
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          if (!mounted) return;
+          // 사용자가 "다시 걸기" 탭한 경우엔 _restartCall 이 새 발신 시작했을 것 — pop 안 함
+          // 그 외엔 자동 pop
+          if (_dialogShown) {
+            _dialogShown = false;
+            Navigator.of(context).pop();
+          }
+        });
+        return;
       default:
         break;
     }
@@ -376,11 +406,11 @@ class _MonitoringScreenState extends State<MonitoringScreen> {
           '잠시 후 다시 시도해보세요.',
           true,
         );
-      case TerminateReason.iceFailed:
+      case TerminateReason.networkLost:
         return (
-          '연결이 끊어졌습니다',
-          '네트워크 상태를 확인해주세요.',
-          false,
+          '연결 불안정으로 통화가 종료되었습니다',
+          '네트워크 상태를 확인하고 다시 시도해주세요.',
+          true,
         );
       case TerminateReason.networkOffline:
         return (

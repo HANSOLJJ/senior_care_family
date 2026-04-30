@@ -4,16 +4,16 @@
 
 ---
 
-## 1. 기능 요약
+# 1. 기능 요약
 
-### 트리거 조건 (Family 측)
+## 트리거 조건 (Family 측)
 | 조건 | 동작 |
 |---|---|
 | `RTCPeerConnectionStateDisconnected` | grace **4초** 후 `_triggerIceRestart()` |
 | `RTCPeerConnectionStateFailed` | **즉시** `_triggerIceRestart()` |
 | `RTCPeerConnectionStateConnected` (복구) | grace 타이머 cancel + 5초 안정 유지 시 attempts=0 / flapWindowStart=null 리셋 |
 
-### 한도 / 가드
+## 한도 / 가드
 | 상수 | 값 | 의미 |
 |---|---|---|
 | `_graceMs` | 4000 ms | DISCONNECTED → restart 트리거 대기 |
@@ -23,20 +23,20 @@
 | `_stableResetMs` | 5000 ms | CONNECTED 안정 유지 시 attempts/flapWindow 리셋 |
 | `_iceRestartInProgress` | bool | 중복 트리거 방지 가드. setRemote(answer) 완료 finally에서 reset |
 
-### 시그널링 채널
+## 시그널링 채널
 | RTDB 경로 | Writer | Reader | 비고 |
 |---|---|---|---|
 | `calls/{cid}/iceRestartOffer` | Family | Senior | `pc.restartIce() + createOffer()` SDP. `writeOrTimeout(3s) + onTimeoutCleanup` 가드 적용 |
 | `calls/{cid}/iceRestartAnswer` | Senior | Family | answer 쓰기 직전 Senior 가 `iceRestartOffer` 노드 선제 삭제 → stale answer 재수신 방지 |
 
-### FSM 전이
+## FSM 전이
 - `connected | upgrading` → `reconnecting` (restart 진입 시, MonitoringScreen 배너용)
 - `reconnecting` → `connected` (CONNECTED 복귀 시, `ice_restored`)
 - 한도 초과 시 → `terminating(iceFailed)` → `terminated`
 
 ---
 
-## 2. 테스트 환경
+# 2. 테스트 환경
 
 - **Family 앱 (A, 주 테스트 기기)**: SM-G991N (Galaxy S21, `R3CR700SEKP`) — Wi-Fi/LTE 전환 가능
 - **Family 앱 (B, 1:N 회귀 테스트용)**: 사용자 보유 2번째 기기 (식별자는 실행 시 `adb devices` 로 확정)
@@ -49,13 +49,13 @@
 
 ---
 
-## 3. 시나리오
+# 3. 시나리오
 
 각 시나리오는 **준비 → 실행 → 기대 결과 → 검증 로그 → 통과 기준** 순.
 
 ---
 
-### S1. Wi-Fi 일시 단절 (grace 4초 내 복구)
+## S1. Wi-Fi 일시 단절 (grace 4초 내 복구)
 
 **가설**: 짧은 끊김은 ICE restart 트리거 없이 자체 복구되어야 한다. 불필요한 SDP 재교환 비용 회피.
 
@@ -82,7 +82,7 @@ WebRTC: 연결 상태 = RTCPeerConnectionStateConnected
 
 ---
 
-### S2. Wi-Fi 단절 → grace 초과 → 복구 (1회 restart 성공)
+## S2. Wi-Fi 단절 → grace 초과 → 복구 (1회 restart 성공)
 
 **가설**: grace 4초를 넘기면 restart 1회로 복구 가능해야 한다.
 
@@ -121,7 +121,7 @@ ICE restart answer 전송 완료
 
 ---
 
-### S3. Wi-Fi → LTE 핸드오프 (NAT 전환)
+## S3. Wi-Fi → LTE 핸드오프 (NAT 전환)
 
 **가설**: 네트워크 인터페이스 변경 시 새 ICE candidate 수집 + 새 경로로 복구 가능해야 한다. (가장 실전적인 케이스)
 
@@ -147,7 +147,7 @@ WebRTC: 연결 상태 = RTCPeerConnectionStateConnected
 
 ---
 
-### S4. Wi-Fi 완전 단절 (5회 재시도 후 종결)
+## S4. Wi-Fi 완전 단절 (5회 재시도 후 종결)
 
 **가설**: 복구 불가능한 상황에서 5회까지만 시도하고 정리.
 
@@ -184,7 +184,7 @@ FSM: terminating ← reconnecting (hangup:iceFailed)
 
 ---
 
-### S5. flap window 60초 초과 (반복 disconnect)
+## S5. flap window 60초 초과 (반복 disconnect)
 
 **가설**: disconnect/connect 가 반복되면 attempts 5 미만이라도 60초 상한으로 종결.
 
@@ -200,7 +200,7 @@ FSM: terminating ← reconnecting (hangup:iceFailed)
 
 ---
 
-### S6. ICE restart 진행 중 사용자 hangUp
+## S6. ICE restart 진행 중 사용자 hangUp
 
 **가설**: restart 도중 hangUp 호출 시 깨끗하게 종결되어야 함 (orphan offer 노드 없음, FSM stuck 없음).
 
@@ -226,7 +226,7 @@ FSM: terminating ← reconnecting (hangup:iceFailed)
 
 ---
 
-### S7. Senior 측 무응답 (10초 answer timeout → 재시도)
+## S7. Senior 측 무응답 (10초 answer timeout → 재시도)
 
 **가설**: Senior 가 ICE restart offer 를 받았으나 answer 못 보내는 경우 (Senior CPU/네트워크 일시 부하).
 
@@ -246,7 +246,7 @@ FSM: terminating ← reconnecting (hangup:iceFailed)
 
 ---
 
-### S8. ICE restart 도중 Senior 앱 강제 종료
+## S8. ICE restart 도중 Senior 앱 강제 종료
 
 **가설**: Senior 가 죽으면 Family 는 5회 시도 후 정리.
 
@@ -265,7 +265,7 @@ FSM: terminating ← reconnecting (hangup:iceFailed)
 
 ---
 
-### S9. CONNECTED 안정 5초 유지 → 카운터 리셋 검증
+## S9. CONNECTED 안정 5초 유지 → 카운터 리셋 검증
 
 **가설**: 1회 restart 성공 후 안정 유지되면 다음 disconnect 가 다시 attempts=1 로 시작.
 
@@ -288,11 +288,11 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S10. ~~양방향 통화 (call) vs 모니터링 (monitor) 동일 동작~~ (폐기)
+## S10. ~~양방향 통화 (call) vs 모니터링 (monitor) 동일 동작~~ (폐기)
 
 **⚠ 폐기됨 (2026-04-24)** — 정책 변경으로 폐기
 
-### S11. 모니터링→통화 업그레이드 도중 ICE failure
+## S11. 모니터링→통화 업그레이드 도중 ICE failure
 
 **1:N displace 정책 영향**: **부분적**. displace 는 upgrade **성공 후** `handleUpgradeRequest` 끝에서 발동 → upgrading 중 ICE failure 로 upgrade 실패 시 monitor 상태로 복귀 → 다른 Family 의 call 수락은 여전히 가능. upgrade 성공 직후 ICE failure 는 이미 displace 가 실행된 뒤라 다른 monitor 들은 모두 종결된 상태.
 
@@ -317,7 +317,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S12. 발신 중 (connecting phase) ICE 실패
+## S12. 발신 중 (connecting phase) ICE 실패
 
 **1:N displace 정책 영향**: 없음 (connecting phase 는 아직 peer 가 Senior peers 목록에 등록되지 않은 단계, displace 대상 아님).
 
@@ -327,7 +327,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **실행**: Family "영상통화" 버튼 탭 → `WIFI_OFF_DELAY_MS` 후 Wi-Fi off.
 
-#### Race window 매핑 (4가지 timing 별 다른 종결 경로)
+### Race window 매핑 (4가지 timing 별 다른 종결 경로)
 
 | WIFI_OFF | 시점 | 종결 사유 | 의미 |
 |---|---|---|---|
@@ -346,7 +346,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S13. 다중 disconnect 동안 중복 트리거 방지
+## S13. 다중 disconnect 동안 중복 트리거 방지
 
 **1:N displace 정책 영향**: 없음 (한 peer 내부 ICE restart race 방지 가드, multi-Family 와 무관).
 
@@ -370,7 +370,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S14. Stale answer 재수신 (Senior 가 offer 노드 선제 삭제로 방어)
+## S14. Stale answer 재수신 (Senior 가 offer 노드 선제 삭제로 방어)
 
 **1:N displace 정책 영향**: 없음 (한 callId 내부 stale answer reject 가드, multi-Family 와 무관).
 
@@ -388,7 +388,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S15. Family 앱 백그라운드 → foreground 복귀
+## S15. Family 앱 백그라운드 → foreground 복귀
 
 **1:N displace 정책 영향**: 없음 (단일 Family 기기의 lifecycle 이슈, multi-Family 와 무관).
 
@@ -410,7 +410,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S16. Senior 측 Wi-Fi 단절 (반대 방향)
+## S16. Senior 측 Wi-Fi 단절 (반대 방향)
 
 **1:N displace 정책 영향**: **간접적**. Senior Wi-Fi 단절 시 모든 Family peer 가 동시 영향 → 각자 ICE restart 시도. 1:N 환경에서 Senior 복구 후 peer 들이 각각 복구되는 양상은 [R6](#r6-1n--senior-wi-fi-off) 에서 별도 검증.
 
@@ -428,7 +428,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **통과 기준**: 짧은 단절 (1~4s) ICE restart 로 복구, 긴 단절 (60s+) 깨끗한 iceFailed 종결.
 
-#### 본 의도와 구현 이력
+### 본 의도와 구현 이력
 
 [Senior `kep_wifi_suspend_presence.md` §"연관 이슈 1"](../../Senior/docs/kep_wifi_suspend_presence.md) — KEP MTK WiFi 자발적 2~3초 drop 떠받치기가 ICE restart 도입 본 의도.
 
@@ -445,7 +445,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### S17. RTDB 쓰기 타임아웃 (오프라인 가드)
+## S17. RTDB 쓰기 타임아웃 (오프라인 가드)
 
 **1:N displace 정책 영향**: 없음 (오프라인 가드는 단일 Family 기기의 RTDB write 처리, multi-Family 와 무관).
 
@@ -466,9 +466,9 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-## 4. 회귀 테스트 (과거 이슈 재발 방지)
+# 4. 회귀 테스트 (과거 이슈 재발 방지)
 
-### R1. 좀비 peer 방지 (c33d770)
+## R1. 좀비 peer 방지 (c33d770)
 
 **과거 이슈**: cleanupCall 즉시 remove → Senior 가 status=ended 못 받고 zombie 상태로 남음 → 다음 발신 거부 (`remoteBusy`).
 
@@ -482,7 +482,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### R2. answered 가 ended 를 LWW(Last Write Wins race) 덮어쓰기 방지 (Senior transaction)
+## R2. answered 가 ended 를 LWW(Last Write Wins race) 덮어쓰기 방지 (Senior transaction)
 
 **과거 이슈**: Family 가 hangUp 으로 status=ended 쓴 직후 Senior 가 sendAnswer 로 status=answered 덮어씀 → Senior 자신의 listener 가 ended 못 받음.
 
@@ -495,7 +495,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### R3. 1:N × 1:1 정책 — displace 절차 실측
+## R3. 1:N × 1:1 정책 — displace 절차 실측
 
 **재정의 (2026-04-24)**: 기존 R3 은 버튼 활성화만 검증했으나, 현재는 Senior 가 call 수락 시 기존 monitor peer 들을 `endReason="otherCallStarted"` 로 displace 하는 전체 경로가 운영 중. 본 회귀는 **displace 가 올바르게 발동하고 Family A 가 명시적 UX(다이얼로그) 로 종결되는지** 실측 검증.
 
@@ -542,7 +542,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### R4. 검은 화면 0개 (FSM 재설계 c2e8bd6)
+## R4. 검은 화면 0개 (FSM 재설계 c2e8bd6)
 
 **과거 이슈**: ICE restart 도중 화면 전환/오버레이 표시 race 로 검은 화면.
 
@@ -553,7 +553,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-## 5. 1:N 환경 회귀 테스트 (displace 정책 도입 후)
+# 5. 1:N 환경 회귀 테스트 (displace 정책 도입 후)
 
 > S1~S17 은 1:1 (Senior 1대 × Family 1대) 기준. 이 §5 는 **Family N대** 환경에서만 발생하는 동작을 별도로 검증.
 >
@@ -568,9 +568,9 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### §5.1 정책 신규 시나리오
+## 5.1 정책 신규 시나리오
 
-#### R5. Family A 단독 Wi-Fi off (multi-peer 독립성 베이스)
+### R5. Family A 단독 Wi-Fi off (multi-peer 독립성 베이스)
 
 **가설**: Senior 의 monitor peer 들은 서로 독립. 한 Family 의 네트워크 장애가 다른 Family 세션에 영향을 주지 않아야 한다.
 
@@ -590,7 +590,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 > R5 는 **§5.2 / §5.3 모든 시나리오의 전제 검증** (peer 독립성). R5 가 실패하면 그 위 시나리오들은 모두 무효.
 
-#### R6. Senior Wi-Fi off (1:N 대칭 처리)
+### R6. Senior Wi-Fi off (1:N 대칭 처리)
 
 **가설**: Senior Wi-Fi 단절 시 모든 Family peer 가 동시 DISCONNECTED → 각자 ICE restart 시도. Senior 복구 시 모두 동시 복구 or 동시 iceFailed 종결.
 
@@ -611,7 +611,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **통과 기준**: A, B 결과가 **대칭** (동일 reason, 동일 FSM 경로). 한쪽만 복구되고 한쪽만 iceFailed 되는 비대칭 0건.
 
-#### R7. Family A iceFailed 중 Family B 영향 없음
+### R7. Family A iceFailed 중 Family B 영향 없음
 
 **가설**: 한 monitor peer 가 iceFailed 로 종결되어도 같은 Senior 의 다른 peer 는 정상 유지.
 
@@ -629,7 +629,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **통과 기준**: A 가 iceFailed 로 사라진 뒤에도 B 가 영상 수신 계속. Senior leak check `peers=1`.
 
-#### R8. Call 중 다른 Family 가 call 발신 (remoteBusy)
+### R8. Call 중 다른 Family 가 call 발신 (remoteBusy)
 
 **가설**: Senior 가 call 중일 때 다른 Family 가 call 발신하면 `endReason="remoteBusy"` 로 즉시 거절.
 
@@ -653,11 +653,16 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-### §5.2 1:1 시나리오의 1:N 변형
+## 5.2 1:1 시나리오의 1:N 변형
 
 > 1:N 에서 새 동작이 추가로 노출되는 것만 골랐음. 다른 S 시나리오 (S1·S5·S6·S8·S9·S12·S13·S14·S15·S17) 는 단순 독립성으로 충분 (R5 통과 시 자동 보장).
 
-#### N3. S3 (LTE 핸드오프) 1:N — A 만 LTE 전환
+
+
+
+
+
+### N3. S3 (LTE 핸드오프) 1:N — A 만 LTE 전환
 
 **가설**: A 가 Wi-Fi → LTE 핸드오프로 새 candidate (TURN relay) 로 복구. B 는 동일 Wi-Fi 유지. **Senior 가 한 peer 는 LTE relay, 다른 peer 는 Wi-Fi p2p 라는 서로 다른 transport 를 동시에 들고 있을 수 있는지** 검증.
 
@@ -674,7 +679,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **통과 기준**: A 복구 (해상도 자동 다운 가능), B 영향 0. Senior 의 ICE candidate pool 이 peer 별로 격리되는지 확인.
 
-#### N7. S7 (Senior 응답 지연) 1:N — Senior CPU 부하
+### N7. S7 (Senior 응답 지연) 1:N — Senior CPU 부하
 
 **가설**: Senior CPU/GC pause 또는 인위적 sleep 으로 응답 지연 시 모든 Family peer 의 ICE restart answer 가 동시 timeout. Senior 의 multi-peer answer 처리가 직렬이면 두 번째 peer 는 더 늦어짐.
 
@@ -694,7 +699,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **검증 포인트**: Senior `MonitoringSession` 의 IO scope 가 peer 별로 독립인지. peer 간 mutex 가 있다면 직렬 처리되어 두 번째 peer 가 timeout 임박할 수 있음.
 
-#### N11. S11 (upgrade 중 ICE failure) 1:N — A upgrade 실패 후 잔존
+### N11. S11 (upgrade 중 ICE failure) 1:N — A upgrade 실패 후 잔존
 
 **가설**: A 가 monitor → call 업그레이드 시도 중 ICE failure 로 upgrade 실패 → A 가 monitor 상태로 잔존 (또는 종결) → 이때 B 가 영상통화를 발신하면 displace 정책이 정상 작동.
 
@@ -716,13 +721,20 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **검증 포인트**: Senior `handleUpgradeRequest` 가 upgrade 실패 시 peer 의 `callType` 을 `monitor` 로 되돌리는지 확인. 만약 upgrade-pending 상태로 stuck 되면 displace 분류가 잘못되어 R3 시나리오가 깨질 수 있음.
 
+
+
+
+
+
+
+
 ---
 
-### §5.3 1:N 고유 timing/overlap 케이스
+## 5.3 1:N 고유 timing/overlap 케이스
 
 > 1:1 에서는 절대 발생할 수 없고, 두 Family 의 상태 전이가 시간 겹침으로만 노출되는 race 케이스.
 
-#### NX1. A grace 중 B 신규 합류 → A 복구
+### NX1. A grace 중 B 신규 합류 → A 복구
 
 **가설**: A 가 disconnect → grace 4s 진입 → 이 사이 B 가 신규 monitor 시도 → A 복구 시 정상 ICE restart. Senior 가 grace 상태의 A peer 를 유지하면서 B peer 를 새로 추가할 수 있어야 함.
 
@@ -742,7 +754,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **edge case**: A 가 grace 중일 때 Senior 의 A peer 는 ENDED 가 아닌 RESTARTING 상태여야 함. STOP_DELAY 15s 만료 전에 복구해야 자동 종결되지 않음.
 
-#### NX2. A iceFailed 직후 재 monitor → B 이미 진행 중
+### NX2. A iceFailed 직후 재 monitor → B 이미 진행 중
 
 **가설**: A 가 iceFailed 로 종결 → A 가 즉시 모니터링 재시도 → B 가 이미 monitor 중 → A 가 정상 합류.
 
@@ -762,7 +774,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **검증 포인트**: Senior 의 `STOP_DELAY 15s` 정리가 끝난 후 재 monitor 인지, 정리 도중 인지에 따라 동작 다름. 정리 도중 재 monitor 시 callId 충돌 (동일 family/device 로 ENDING + NEW peer 동시 존재) 발생 가능성 확인.
 
-#### NX3. A·B 동시 Wi-Fi off → 병렬 ICE restart
+### NX3. A·B 동시 Wi-Fi off → 병렬 ICE restart
 
 **가설**: A, B 가 동시에 Wi-Fi off → 동시에 grace 진입 → 동시에 ICE restart 트리거. Senior 의 multi-peer queue 가 두 offer 를 병렬 처리.
 
@@ -782,7 +794,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **검증 포인트**: Senior 로그에서 A, B 의 offer 처리 시간 차가 작은지 (±100ms) 확인. 직렬 처리되면 두 번째 peer 가 늦어짐 → N7 와 묶어 보면 Senior 처리 모델이 보임.
 
-#### NX4. 4번째 monitor → capacityExceeded
+### NX4. 4번째 monitor → capacityExceeded
 
 **가설**: Senior 의 `MAX_PEERS=3` 상한 도달 시 4번째 peer 는 `capacityExceeded` 로 즉시 거절.
 
@@ -800,7 +812,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 **전제**: Family 기기 4대 필요. **현재 사용자 보유 2대만 있으면 보류** — Senior 코드의 `MAX_PEERS=3` 상수를 임시로 2 로 낮춰서 3번째 거절 케이스로 검증 가능 (코드 변경 후 복원 필요).
 
-#### NX5. 동시 upgrade race
+### NX5. 동시 upgrade race
 
 **가설**: A monitor + B monitor 상태에서 A 와 B 가 거의 동시에 영상통화 발신 → Senior 의 `setSeniorAccepted` transaction 이 race-safe 하여 한쪽만 성공, 다른 쪽은 명시적 거절.
 
@@ -825,7 +837,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-## 6. 기록 양식
+# 6. 기록 양식
 
 각 시나리오 실행 결과를 아래 표로 기록:
 
@@ -837,7 +849,7 @@ WebRTC: ICE restart offer 전송 (attempt=1)  ← 두 번째 사이클에서도 
 
 ---
 
-## 7. 알려진 한계 / 미검증
+# 7. 알려진 한계 / 미검증
 
 - **TURN 서버 의존**: 대칭 NAT 환경에서 STUN p2p 실패 시 relay 필요. 현재 ICE 서버 설정 (`_iceServers`) 의 TURN credential 만료 여부 확인 안됨.
 - **iOS 미테스트**: 본 시트는 Android 기준. iOS (Sol iPhone) 에서 백그라운드 동작 별도 검증 필요.

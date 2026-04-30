@@ -34,7 +34,7 @@ enum CallPhase {
 /// | reason | 반응 |
 /// |---|---|
 /// | userHangup, remoteEnded, orphanCleaned | 즉시 pop |
-/// | unreachable, noAcceptance, iceFailed, networkOffline, remoteBusy, endedByOtherCall, capacityExceeded | 다이얼로그 → pop |
+/// | unreachable, noAcceptance, networkLost, networkOffline, remoteBusy, endedByOtherCall, capacityExceeded | 다이얼로그/SnackBar → pop |
 /// | upgradeFailed | SnackBar 표시 + pop (hangUp 으로 PC 해제됨) |
 enum TerminateReason {
   /// 사용자 종료 버튼
@@ -49,8 +49,9 @@ enum TerminateReason {
   /// Phase 2 timeout (20s 내 수락 없음, call 타입 전용)
   noAcceptance,
 
-  /// ICE restart flap window 60s / retry 5회 모두 실패
-  iceFailed,
+  /// ICE restart 1회 시도 실패 (answer 10s 미수신 또는 RTDB write 실패)
+  /// 또는 PC DISCONNECTED 상태에서 endReason 수신 (iOS wifi flap 떠받치기)
+  networkLost,
 
   /// monitor → call renegotiate answer 미수신
   upgradeFailed,
