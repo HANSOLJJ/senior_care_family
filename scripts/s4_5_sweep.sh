@@ -14,8 +14,8 @@
 #   BETWEEN_S    사이클 간 대기 (기본 10s — 모니터링 정리 + 다이얼로그 dismiss)
 #
 # 사용법:
-#   bash scripts/s16_auto_sweep.sh                                # 기본 8 stages
-#   DURATIONS="3 6 15" bash scripts/s16_auto_sweep.sh             # 3개만
+#   bash scripts/s4_5_sweep.sh                                # 기본 8 stages
+#   DURATIONS="3 6 15" bash scripts/s4_5_sweep.sh             # 3개만
 
 set +e
 trap 'echo "[SWEEP] cleanup: Senior Wi-Fi enable"; adb -s KEP2024120921 shell svc wifi enable >/dev/null 2>&1' EXIT
@@ -23,7 +23,7 @@ trap 'echo "[SWEEP] cleanup: Senior Wi-Fi enable"; adb -s KEP2024120921 shell sv
 DURATIONS=${DURATIONS:-"1 2 3 4 5 6 15 70"}
 BETWEEN_S=${BETWEEN_S:-10}
 
-LOG_DIR=e:/tmp/s16_auto
+LOG_DIR=e:/tmp/s4_5_auto
 mkdir -p "$LOG_DIR"
 SUMMARY="$LOG_DIR/sweep_summary.log"
 > "$SUMMARY"
@@ -51,7 +51,7 @@ for d in $DURATIONS; do
     OBS=25
   fi
 
-  CYCLE_OUT=$(SENIOR_OFF_S=$d OBSERVE_S=$OBS bash e:/App/Family/scripts/s16_auto.sh 2>&1)
+  CYCLE_OUT=$(SENIOR_OFF_S=$d OBSERVE_S=$OBS bash e:/App/Family/scripts/s4_5_auto.sh 2>&1)
   echo "$CYCLE_OUT" | grep -E "Family 측 카운트:|PC DISCONNECTED:|PC CONNECTED:|ICE restart attempt:|ice_restart_start:|ice_restored:|종결 사유:|✅|⚠" | tee -a "$SUMMARY"
 
   CLASS=$(echo "$CYCLE_OUT" | grep -oE '\[S16\] [✅⚠] .*' | tail -1)

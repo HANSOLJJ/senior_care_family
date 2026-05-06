@@ -1,95 +1,173 @@
 #!/bin/bash
-# S8 자동 테스트 — ICE restart 도중 Senior 기기 파워 리셋
+# R2 자동 — restoreActiveStatus LWW race 검증
 #
-# 가설: Senior 가 죽으면 Family 는 5회 시도 후 iceFailed 로 정리.
-#       부수적으로 `_iceRestartAnswerTimer(10s)` 발동 경로도 함께 검증됨.
+# 시나리오:
+#   T+0      Senior Wi-Fi off → server-side onDisconnect 발화
+#            → /calls/{cid}: status="ended" + endReason="seniorDisconnect"
+#   T+W1     Family hangUp tap → endCall 이 status="ended" 만 덮어씀
+#            (endReason 은 안 건드림 → "seniorDisconnect" 그대로)
+#   T+W1+W2  Senior Wi-Fi on → reconnect → listenForStatus 가
+#            {status=ended, endReason=seniorDisconnect} 받음 → 자기 결과로 인식
+#            → cancelDisconnectCleanup + restoreActiveStatus
+#            → setValue(status="answered", endReason=null) ← 좀비 노드!
 #
-# Senior 앱은 Device Owner 모드 + HAL freeze 자동 재부팅 로직 때문에
-# `am force-stop` 이 무효 (좋은 방어 장치). 본 스크립트는 `adb reboot` 으로
-# 기기 전체 재부팅하여 실전의 "전원 reset / OS crash / OTA 재시작" 케이스를
-# 재현한다.
+# 검증 포인트:
+#   - Senior 로그 "active status 복원 완료" → R2 race 발생 (좀비 시도)
+#   - Family 로그 "calls 노드 삭제" → cleanupCall 10s 지연 후 자동 정리 확인
+#   - 두 시점 사이 "통화 유지" 화면 vs Family "종료" UX 불일치
 #
-# 사전조건:
-#   1. Family 앱이 MonitoringScreen 에서 CONNECTED 상태
-#   2. Senior 앱 실행 중
-#
-# 실행 흐름:
-#   Wi-Fi off → grace 4s → ice_restart_start 감지 →
-#   Senior reboot → Wi-Fi on → 80s 대기 → iceFailed 종결 확인
-#   (Senior 재부팅 완료는 비동기, 스크립트 종료 후 자연 복귀)
+# 환경 변수:
+#   ONDISCONNECT_WAIT_S   onDisconnect 발화 대기 (기본 1.5)
+#   HANGUP_TO_WIFI_ON_S   Family hangUp → Senior Wi-Fi on (기본 0.5)
+#   OBSERVE_S             관찰 시간 (기본 15)
 #
 # 사용법:
-#   bash scripts/s8_auto.sh
+#   bash scripts/s8_auto.sh                              # 기본
+#   ONDISCONNECT_WAIT_S=2 bash scripts/s8_auto.sh        # onDisconnect 더 확실히 대기
 
 set +e
+trap 'echo "[R2] cleanup: Senior Wi-Fi enable"; adb -s KEP2024120921 shell svc wifi enable >/dev/null 2>&1' EXIT
 
 FAMILY_DEVICE=R3CR700SEKP
 SENIOR_DEVICE=KEP2024120921
-SENIOR_PKG=com.seniorcare.senior
 
-# 종료 시 Wi-Fi 복구 보장
-trap 'adb -s $FAMILY_DEVICE shell cmd wifi set-wifi-enabled enabled >/dev/null 2>&1' EXIT
+MONITOR_BTN_X=795
+MONITOR_BTN_Y=918
+HANGUP_BTN_X=768
+HANGUP_BTN_Y=2202
+
+ONDISCONNECT_WAIT_S=${ONDISCONNECT_WAIT_S:-1.5}
+HANGUP_TO_WIFI_ON_S=${HANGUP_TO_WIFI_ON_S:-0.5}
+OBSERVE_S=${OBSERVE_S:-15}
+
+LOG_DIR=e:/tmp/s8_auto
+mkdir -p "$LOG_DIR"
 
 PID_F=$(adb -s $FAMILY_DEVICE shell pidof com.seniorcare.family | tr -d '\r')
-PID_S=$(adb -s $SENIOR_DEVICE shell pidof $SENIOR_PKG | tr -d '\r')
+PID_S=$(adb -s $SENIOR_DEVICE shell pidof com.seniorcare.senior | tr -d '\r')
 echo "PID_F=$PID_F PID_S=$PID_S"
-
 if [ -z "$PID_F" ] || [ -z "$PID_S" ]; then
-  echo "[S8] ERROR: Family or Senior app not running"
+  echo "[R2] ERROR: app not running"
   exit 1
 fi
 
-mkdir -p e:/tmp/ice_test
-> e:/tmp/ice_test/family.log
-> e:/tmp/ice_test/senior.log
-echo "==== S8 auto: Family=$PID_F Senior=$PID_S ====" >> e:/tmp/ice_test/family.log
-echo "========== S8 START $(date +%T) ==========" >> e:/tmp/ice_test/family.log
+echo "[R2] === START ==="
+echo "[R2] race window: onDisconnect_wait=${ONDISCONNECT_WAIT_S}s, hangup→wifi_on=${HANGUP_TO_WIFI_ON_S}s"
 
-BASELINE=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | wc -l)
-echo "[S8] baseline=$BASELINE lines"
+# Step 0: 다이얼로그 dismiss
+DIALOG_DUMP=$(adb -s $FAMILY_DEVICE shell "uiautomator dump /sdcard/_r2_check.xml >/dev/null 2>&1; cat /sdcard/_r2_check.xml" 2>/dev/null)
+if echo "$DIALOG_DUMP" | grep -q 'content-desc="확인"'; then
+  OK_BOUNDS=$(echo "$DIALOG_DUMP" | grep -oE 'content-desc="확인"[^/]*bounds="\[[0-9,]+\]\[[0-9,]+\]"' | head -1 | grep -oE 'bounds="\[[0-9,]+\]\[[0-9,]+\]"' | tr -dc '0-9,')
+  X1=$(echo "$OK_BOUNDS" | cut -d, -f1); Y1=$(echo "$OK_BOUNDS" | cut -d, -f2)
+  X2=$(echo "$OK_BOUNDS" | cut -d, -f3); Y2=$(echo "$OK_BOUNDS" | cut -d, -f4)
+  CX=$(( (X1 + X2) / 2 )); CY=$(( (Y1 + Y2) / 2 ))
+  echo "[R2] Dismiss 다이얼로그 ($CX,$CY)"
+  adb -s $FAMILY_DEVICE shell input tap $CX $CY
+  sleep 1
+fi
 
-echo "[S8] Wi-Fi off @ $(date +%T.%3N)"
-adb -s $FAMILY_DEVICE shell cmd wifi set-wifi-enabled disabled >/dev/null 2>&1
+# Step 1: 모니터링 시작
+BASELINE_F=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | wc -l)
+BASELINE_S=$(adb -s $SENIOR_DEVICE logcat -d --pid=$PID_S 2>/dev/null | wc -l)
+echo "[R2] Tap 모니터링 ($MONITOR_BTN_X,$MONITOR_BTN_Y) @ $(date +%T.%3N)"
+adb -s $FAMILY_DEVICE shell input tap $MONITOR_BTN_X $MONITOR_BTN_Y
 
-echo "[S8] Polling for ice_restart_start..."
-DETECTED=0
-for i in {1..30}; do
+CONNECTED=0
+for i in {1..20}; do
   sleep 0.5
-  NEW=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE+1)))
-  if echo "$NEW" | grep -q "ice_restart_start"; then
-    echo "[S8] ice_restart_start @ $(date +%T.%3N)"
-    DETECTED=1
+  NEW=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE_F+1)))
+  if echo "$NEW" | grep -q "answer_received"; then
+    CONNECTED=1
+    echo "[R2] FSM connected @ $(date +%T.%3N)"
     break
   fi
 done
-
-if [ "$DETECTED" -eq 0 ]; then
-  echo "[S8] ERROR: ice_restart_start not detected in 15s — aborting"
+if [ "$CONNECTED" -eq 0 ]; then
+  echo "[R2] ERROR: monitor connect 실패"
   exit 1
 fi
 
-# offer 가 Firebase 에 쓸 여유 주기 (Wi-Fi 복구 후 flush 대비)
-sleep 0.3
+# callId 추출 (Family 로그에서)
+CALL_ID=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE_F+1)) | grep -oE 'callId[=: ][a-zA-Z0-9_-]{10,}' | head -1 | grep -oE '[a-zA-Z0-9_-]{10,}$')
+echo "[R2] callId=$CALL_ID"
 
-echo "[S8] Senior reboot @ $(date +%T.%3N)"
-adb -s $SENIOR_DEVICE reboot
+sleep 3  # 안정화
 
-sleep 1
-echo "[S8] Wi-Fi on @ $(date +%T.%3N)"
-adb -s $FAMILY_DEVICE shell cmd wifi set-wifi-enabled enabled >/dev/null 2>&1
+# Step 2: Senior Wi-Fi off
+T_OFF=$(date +%s.%3N)
+echo "[R2] Senior Wi-Fi off @ $(date +%T.%3N)"
+adb -s $SENIOR_DEVICE shell svc wifi disable
 
-echo "[S8] Waiting up to 80s for iceFailed..."
-for i in {1..160}; do
-  sleep 0.5
-  TAIL=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE+1)))
-  if echo "$TAIL" | grep -q "CallPhase.terminated"; then
-    echo "[S8] terminated @ $(date +%T.%3N) (after $((i/2))s)"
-    break
+# Step 3: onDisconnect 발화 대기
+echo "[R2] onDisconnect 발화 대기 ${ONDISCONNECT_WAIT_S}s..."
+sleep $ONDISCONNECT_WAIT_S
+
+# Step 4: Family hangUp tap (race 트리거)
+T_HANGUP=$(date +%s.%3N)
+echo "[R2] Family hangUp tap ($HANGUP_BTN_X,$HANGUP_BTN_Y) @ $(date +%T.%3N)"
+adb -s $FAMILY_DEVICE shell input tap $HANGUP_BTN_X $HANGUP_BTN_Y
+
+# Step 5: Senior Wi-Fi on (race 활성)
+sleep $HANGUP_TO_WIFI_ON_S
+T_ON=$(date +%s.%3N)
+echo "[R2] Senior Wi-Fi on @ $(date +%T.%3N)"
+adb -s $SENIOR_DEVICE shell svc wifi enable
+
+# Step 6: observation
+echo "[R2] Observation ${OBSERVE_S}s..."
+sleep $OBSERVE_S
+
+# 로그 저장
+adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE_F+1)) > "$LOG_DIR/family.log"
+adb -s $SENIOR_DEVICE logcat -d -v time -b all > "$LOG_DIR/senior_all.log" 2>&1
+grep " $PID_S " "$LOG_DIR/senior_all.log" > "$LOG_DIR/senior.log" 2>/dev/null
+[ ! -s "$LOG_DIR/senior.log" ] && cp "$LOG_DIR/senior_all.log" "$LOG_DIR/senior.log"
+
+echo ""
+echo "[R2] === RESULT ==="
+
+NEW_F=$(cat "$LOG_DIR/family.log")
+NEW_S=$(cat "$LOG_DIR/senior.log")
+
+# Senior 측 분기
+RESTORE_LOGS=$(echo "$NEW_S" | grep -E "active status 복원|onDisconnect cleanup 취소|seniorDisconnect")
+HANGUP_FAMILY=$(echo "$NEW_F" | grep -E "hangup:|endCall|통화 종료 신호|calls 노드 삭제|cleanupCall")
+
+RESTORE_OK=$(echo "$NEW_S" | grep -c "active status 복원 완료")
+CANCEL_OK=$(echo "$NEW_S" | grep -c "onDisconnect cleanup 취소")
+
+echo "[R2] Senior 측 분기:"
+echo "  cancelDisconnectCleanup 호출: $CANCEL_OK"
+echo "  restoreActiveStatus 성공:     $RESTORE_OK"
+echo ""
+echo "[R2] Senior 관련 로그:"
+echo "$RESTORE_LOGS" | head -10
+echo ""
+echo "[R2] Family hangUp/cleanup 로그:"
+echo "$HANGUP_FAMILY" | head -10
+
+# 결과 분류
+echo ""
+if [ $RESTORE_OK -gt 0 ]; then
+  echo "[R2] ⚠ RACE 발생 — Senior restoreActiveStatus 호출됨"
+  echo "    → /calls/$CALL_ID 가 status='answered', endReason=null 로 좀비 시도"
+  if echo "$NEW_F" | grep -q "calls 노드 삭제\|cleanupCall.*완료\|remove 완료"; then
+    echo "    → ✅ Family cleanupCall(10s 지연) 이 좀비 노드 정리"
+    echo "    → 결과: 좀비 일시 발생 후 자동 정리. 그래도 fix 권장 (UX 일시 불일치 + cleanup 실패 대비)"
+  else
+    echo "    → ❌ Family cleanupCall 흔적 없음 — 좀비 노드 잔존 가능성. Firebase Console 확인 필요"
   fi
-done
+elif [ $CANCEL_OK -gt 0 ]; then
+  echo "[R2] ⚠ 부분 race — cancelDisconnectCleanup 만 호출. restoreActiveStatus 미발화 (race window 빗나감)"
+else
+  echo "[R2] ✅ NO RACE — Senior 분기 안 탐"
+  echo "    → Family hangUp 이 endReason 까지 덮어쓴 경우 또는"
+  echo "    → onDisconnect 가 wifi off 1.5s 안에 발화 안 한 경우"
+  echo "    → ONDISCONNECT_WAIT_S 늘려서 재시도"
+fi
 
-echo "========== S8 END $(date +%T) ==========" >> e:/tmp/ice_test/family.log
-adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null >> e:/tmp/ice_test/family.log
-
-echo "[S8] Senior 부팅은 자연 복귀 (수 분 소요). Family log: e:/tmp/ice_test/family.log"
-echo "[S8] Done"
+echo ""
+echo "[R2] Logs:"
+echo "  $LOG_DIR/family.log"
+echo "  $LOG_DIR/senior.log"
+echo "[R2] === DONE ==="

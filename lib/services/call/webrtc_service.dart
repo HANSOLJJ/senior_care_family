@@ -114,12 +114,9 @@ class WebRtcService {
   /// ICE restart answer 감시 구독 (`iceRestartAnswer`)
   StreamSubscription? _iceRestartAnswerSub;
 
-  /// Senior 측 server-side onDisconnect (`endReason="seniorDisconnect"`) 수신 시
-  /// 즉시 hangUp 안 하고 grace 동안 ICE restart 자연 진입 + Senior 복구 대기.
-  /// PC CONNECTED 복귀 시 cancel, 만료 시 `hangUp(remoteEnded)`.
-  /// 배경: kep_wifi_suspend_presence.md §"연관 이슈 1" — KEP MTK WiFi 자발적 2~3s drop.
-  Timer? _seniorDisconnectGraceTimer;
-  static const _seniorDisconnectGraceMs = 15000;
+  /// hasFlapMarker 감시 구독 (Plan B — 필드 분리 모델)
+  /// 자기 마커 받으면 clear + onDisconnect 재등록.
+  StreamSubscription? _flapMarkerSub;
 
   // ─── ICE candidate 큐 / 경로 ───
 
@@ -433,9 +430,6 @@ class WebRtcService {
       _triggerIceRestart();
     } else if (state == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _disconnectTimer?.cancel();
-      // Senior 일시 단절 grace timer cancel — Senior 복구 + ICE restart 성공으로 PC 복귀
-      _seniorDisconnectGraceTimer?.cancel();
-      _seniorDisconnectGraceTimer = null;
       _iceRestartInProgress = false; // 안전망
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = null;
@@ -662,48 +656,29 @@ class WebRtcService {
       ));
     });
 
+    // Plan B (필드 분리): status="ended" = 무조건 진짜 종결. endReason 분기 없음.
+    // wifi flap 신호는 hasFlapMarker 별도 필드로 분리 → _flapMarkerSub 가 담당.
     _callEndSub = _signaling.listenForCallEnd(callId, (endReason) {
       if (_isEnding) return;
-      // ★ Senior server-side onDisconnect 결과 — 즉시 hangUp 안 하고 grace 대기.
-      // 배경: KEP MTK WiFi 자발적 2~3s drop (kep_wifi_suspend_presence.md §"연관 이슈 1").
-      // grace 동안 Family PC keepalive timeout (5s) → ICE restart 자연 진입 →
-      // Senior 복구 시 통화 유지. 만료 시 hangUp(remoteEnded) 정상 종결.
-      if (endReason == 'seniorDisconnect') {
-        print('WebRTC: Senior 일시 단절 감지 → grace ${_seniorDisconnectGraceMs}ms 대기');
-        _seniorDisconnectGraceTimer?.cancel();
-        _seniorDisconnectGraceTimer = Timer(
-          const Duration(milliseconds: _seniorDisconnectGraceMs),
-          () {
-            if (_isEnding) return;
-            // PC 가 이미 CONNECTED 복귀했으면 hangUp 안 함 (ICE restart 성공 또는 자가 복구)
-            if (_peerConnection?.connectionState ==
-                RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-              print('WebRTC: Senior 복구 확인 → grace 종료, 통화 유지');
-              return;
-            }
-            print('WebRTC: Senior 복구 실패 → hangUp(remoteEnded)');
-            hangUp(reason: TerminateReason.remoteEnded);
-            onCallEnded?.call();
-          },
-        );
-        return; // 즉시 hangUp 안 함
-      }
-      // ★★ 자기 측 server-side onDisconnect 결과 (plan A — Family wifi flap).
-      // wifi 복귀 후 reconnect 시 자기 마커를 받음. PC 가 CONNECTED 면 ICE restart 성공
-      // (또는 PC 자가 복구) → 마커 무시하고 통화 유지. PC 가 미복구면 networkLost 종결.
-      if (endReason == 'familyDisconnect') {
-        final pcState = _peerConnection?.connectionState;
-        if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
-          print('WebRTC: 자기 familyDisconnect 마커 무시 (PC CONNECTED — 통화 유지)');
-          return;
-        }
-        print('WebRTC: 자기 familyDisconnect 마커 + PC 미복구 → networkLost 종결');
-        hangUp(reason: TerminateReason.networkLost);
-        onCallEnded?.call();
-        return;
-      }
       hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
+    });
+
+    // hasFlapMarker — Plan B (필드 분리). 자기/상대 마커 구분은 PC connectionState 로:
+    // - PC=CONNECTED: 자기 마커 추정 (wifi 복귀 후 RTDB 에서 자기 마커 도달) → clear + 재등록.
+    // - PC=DISCONNECTED 등: 상대 (Senior) wifi flap 추정 → 별도 timer 안 둠. PC keepalive
+    //   가 곧 끊김 인지 → _onPeerConnectionStateChanged → grace 4s + ICE restart 자체 흐름 위임.
+    _flapMarkerSub = _signaling.listenForFlapMarker(callId, (hasFlap) async {
+      if (_isEnding) return;
+      if (!hasFlap) return;
+      final pcState = _peerConnection?.connectionState;
+      if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        print('WebRTC: 자기 hasFlapMarker (PC=CONNECTED) → clear + onDisconnect 재등록');
+        await _signaling.clearFlapMarker(callId);
+        await _signaling.setCallCleanupOnDisconnect(callId);
+      } else {
+        print('WebRTC: hasFlapMarker (PC=$pcState) → 상대 wifi flap 추정, ICE restart 흐름 위임');
+      }
     });
 
     _iceRestartAnswerSub =
@@ -948,8 +923,9 @@ class WebRtcService {
     if (!_fsm.to(CallPhase.upgrading, reason: reason)) return;
     print('WebRTC: 모니터링 → 통화 전환 (reason=$reason)');
 
-    // 모니터링 중 mute 시켰던 원격 오디오 track 재활성화
-    _remoteStream?.getAudioTracks().forEach((t) => t.enabled = true);
+    // 모니터링 중 mute 시켰던 원격 오디오 track 재활성화 (release 빌드만)
+    // debug 빌드는 sweep 테스트 노이즈 방지 위해 mute 유지
+    _remoteStream?.getAudioTracks().forEach((t) => t.enabled = !kDebugMode);
 
     // 로컬 미디어 획득 (startCall에서 이미 프리뷰 시작했으면 재사용)
     if (_localStream == null) {
@@ -1061,8 +1037,6 @@ class WebRtcService {
     _disconnectTimer = null;
     _iceRestartAnswerTimer?.cancel();
     _iceRestartAnswerTimer = null;
-    _seniorDisconnectGraceTimer?.cancel();
-    _seniorDisconnectGraceTimer = null;
     _stopAecStats();
 
     // 모든 시그널링 구독 해제 (callEnd 콜백이 hangUp을 다시 호출하는 루프 방지)
@@ -1071,11 +1045,13 @@ class WebRtcService {
     await _callEndSub?.cancel();
     await _iceRestartAnswerSub?.cancel();
     await _seniorAcceptedSub?.cancel();
+    await _flapMarkerSub?.cancel();
     _answerSub = null;
     _calleeCandidatesSub = null;
     _callEndSub = null;
     _iceRestartAnswerSub = null;
     _seniorAcceptedSub = null;
+    _flapMarkerSub = null;
 
     // ICE restart 상태 리셋 (1-shot 정책)
     isReconnecting.value = false;

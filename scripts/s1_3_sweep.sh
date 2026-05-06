@@ -15,8 +15,8 @@
 #   BETWEEN_S    사이클 간 대기 (기본 10s — SnackBar dismiss + Senior 정리)
 #
 # 사용법:
-#   bash scripts/s2_auto_sweep.sh                                 # 기본 8 stages
-#   DURATIONS="1 3 6 15" bash scripts/s2_auto_sweep.sh            # 4개만
+#   bash scripts/s1_3_sweep.sh                                 # 기본 8 stages
+#   DURATIONS="1 3 6 15" bash scripts/s1_3_sweep.sh            # 4개만
 
 set +e
 trap 'echo "[SWEEP] cleanup: Family Wi-Fi enable"; adb -s R3CR700SEKP shell svc wifi enable >/dev/null 2>&1' EXIT
@@ -24,7 +24,7 @@ trap 'echo "[SWEEP] cleanup: Family Wi-Fi enable"; adb -s R3CR700SEKP shell svc 
 DURATIONS=${DURATIONS:-"1 2 3 4 5 6 15 70"}
 BETWEEN_S=${BETWEEN_S:-10}
 
-LOG_DIR=e:/tmp/s2_auto
+LOG_DIR=e:/tmp/s1_3_auto
 mkdir -p "$LOG_DIR"
 SUMMARY="$LOG_DIR/sweep_summary.log"
 > "$SUMMARY"
@@ -52,7 +52,7 @@ for d in $DURATIONS; do
     OBS=25
   fi
 
-  CYCLE_OUT=$(FAMILY_OFF_S=$d OBSERVE_S=$OBS bash e:/App/Family/scripts/s2_auto.sh 2>&1)
+  CYCLE_OUT=$(FAMILY_OFF_S=$d OBSERVE_S=$OBS bash e:/App/Family/scripts/s1_3_auto.sh 2>&1)
   echo "$CYCLE_OUT" | grep -E "Family 측 카운트:|Senior 측 카운트:|PC DISCONNECTED:|PC CONNECTED:|ICE restart 1회 시도|ice_restored:|자기 마커|familyDisconnect grace|ICE restart 수신|sticky 차단|STOP_DELAY|종결 사유:|✅|⚠" | tee -a "$SUMMARY"
 
   CLASS=$(echo "$CYCLE_OUT" | grep -oE '\[S2\] [✅⚠] .*' | tail -1)

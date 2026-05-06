@@ -99,7 +99,7 @@ Senior 기기의 모든 정보를 담는 유일한 출처 (single source of trut
 | --- | --- |
 | **Family** | `offer`, `callerCandidates`, `status` (ringing\|ended), `endReason` (remoteEnded), `upgradeRequest`, `renegotiateOffer`, `iceRestartOffer`, `callerUid`, `callerName`, `targetDeviceId`, `targetFamilyId`, `callType`, `createdAt` |
 | **Senior** | `answer`, `calleeCandidates`, `status` (answered), `endReason` (normal\|remoteBusy\|capacityExceeded\|otherCallStarted), `seniorAccepted`, `renegotiateAnswer`, `iceRestartAnswer` |
-| **Server-side onDisconnect** (S16 fix) | `status="ended"` + `endReason="seniorDisconnect"` (Senior wifi 끊김 시 Firebase 서버가 자동 기록하는 임시 마커) |
+| **Server-side onDisconnect** (Plan B 필드 분리) | `hasFlapMarker=true` (Family/Senior wifi 끊김 시 Firebase 서버가 자동 기록. **status 는 건드리지 않음** — 라이프사이클은 정상 종결만 status="ended") |
 
 > ⚠️ Family 내부 `TerminateReason.iceFailed` / `unreachable` / `noAcceptance` 등은 **Dart enum 값이며 RTDB endReason 에 도달하지 않음** (Family UX 매핑 전용). RTDB 에 실제로 쓰이는 Family endReason 은 `"remoteEnded"` 한 가지 (R2 fix 이후 도입). 매핑 상세는 [call-scenarios.md §10](call-scenarios.md).
 
@@ -127,6 +127,7 @@ Senior 기기의 모든 정보를 담는 유일한 출처 (single source of trut
 | `renegotiateAnswer` | { sdp, type } \| null | renegotiate answer (Senior writer) |
 | `iceRestartOffer` | { sdp, type } \| null | ICE restart offer (Family writer) |
 | `iceRestartAnswer` | { sdp, type } \| null | ICE restart answer (Senior writer) |
+| `hasFlapMarker` | true \| null | wifi flap 신호 — Server-side onDisconnect 가 자동 set, 자기 wifi 복귀 후 client 가 clear (Plan B 필드 분리) |
 
 ### `status` 라이프사이클
 
@@ -136,7 +137,7 @@ Senior 기기의 모든 정보를 담는 유일한 출처 (single source of trut
 | `"ringing" → "answered"` | Senior | `sendAnswer` | LWW 주의: 이미 "ended" 면 덮어쓰지 않음 (Senior 측 status 사전 검사 필요) |
 | `"*" → "ended"` (Family) | Family | `hangUp` → `endCall` | `endReason="remoteEnded"` 동반 set (R2 fix) |
 | `"*" → "ended"` (Senior) | Senior | `hangUp` / `markEnded` | `endReason` 동반 set (normal/remoteBusy/...) |
-| `"*" → "ended"` (서버 자동) | onDisconnect | Senior wifi 끊김 | `endReason="seniorDisconnect"` 마커 (S16 fix) |
+| `"*" → "ended"` (Senior 강제) | Senior | STOP_DELAY 만료 → `stopPeer` | wifi flap 종결 시 Senior 가 status="ended" 강제 set (Plan B — server-side onDisconnect 는 status 안 건드림) |
 
 ### `endReason` 매트릭스
 
@@ -147,12 +148,14 @@ Senior 기기의 모든 정보를 담는 유일한 출처 (single source of trut
 | `"capacityExceeded"` | Senior | monitor `MAX_PEERS=3` 초과 → 신규 monitor 거절 | `capacityExceeded` |
 | `"otherCallStarted"` | Senior | call 수락 → 기존 monitor peer 들 displace | `endedByOtherCall` |
 | `"remoteEnded"` | **Family** (R2 fix) | `endCall` (사용자 hangUp 등 모든 Family-측 종결) | `remoteEnded` (자기 콜백은 `_isEnding` 가드로 무시) |
-| `"seniorDisconnect"` | Server-side onDisconnect (S16 fix) | Senior wifi 끊김 시 Firebase 서버가 자동 기록 | Family: grace 15s 대기 → PC CONNECTED 면 통화 유지 / 만료 시 hangUp(remoteEnded). Senior: wifi 복구 후 자기 결과 무시 + `restoreActiveStatus` 로 endReason=null 복원 |
 
-### S16/R2 fix 보충
+> **Plan B 필드 분리 이후**: `familyDisconnect` / `seniorDisconnect` 마커 없어짐. wifi flap 신호는 별도 `hasFlapMarker` 필드로 분리. status 는 정상 종결만 표현.
 
-- **S16 (`seniorDisconnect` 마커)**: Senior wifi 자발적 2~3초 drop 케이스에 통화를 유지하기 위한 메커니즘. Senior server-side onDisconnect 가 노드를 삭제하지 않고 임시 종결 마커만 남김 → Family grace + Senior 자기 결과 무시로 통화 떠받침
-- **R2 (Family `remoteEnded` 도입)**: Family hangUp 이 endReason 을 명시적으로 쓰지 않으면 Senior 측 stale `seniorDisconnect` 마커가 잔존 → Senior 가 자기 결과로 오판하고 `restoreActiveStatus` 호출 → 좀비 통화 화면. Family endCall 이 endReason="remoteEnded" 도 같이 쓰면 Senior 가 stale 마커 안 봄
+### Plan B (필드 분리) 보충
+
+- **wifi flap 신호 (`hasFlapMarker=true`)**: Family 또는 Senior wifi 끊김 시 Firebase server-side onDisconnect 가 자동 set. 상대 측은 `listenForFlapMarker` 로 받아서 PC connectionState 기반 자기/상대 마커 구분 — PC=CONNECTED 면 자기 마커로 추정 후 clear + onDisconnect 재등록, PC≠CONNECTED 면 상대 wifi flap 으로 grace 진입.
+- **race 해결**: Plan A 에서 `status="ended"` 한 필드에 wifi flap 마커 + 진짜 종결 두 의미를 담아 모든 listener 가 endReason 분기 → 영상통화 1→2 전이 race 등 폭발. 필드 분리로 status 변경 = 무조건 진짜 종결 → 분기 사라짐.
+- **R2 (Family `remoteEnded`)**: Plan B 에서도 유지 — Senior 가 받은 endReason 으로 UX 매핑.
 
 ---
 
@@ -481,7 +484,7 @@ Family 삭제 요청  → RTDB 노드 즉시 remove()
 
 **Family 앱 마이그레이션 이력**: [presence_migration_handover.md](presence_migration_handover.md) — 본 v4 배포로 마이그레이션 완료.
 
-### v4 → 현재 (S16 + R2 fix)
+### v4 → Plan A (S16 + R2 fix)
 
 | 변경 | 내용 |
 | --- | --- |
@@ -489,3 +492,15 @@ Family 삭제 요청  → RTDB 노드 즉시 remove()
 | `/calls/{cid}` Senior `restoreActiveStatus` | (S16) wifi 복구 후 자기 마커 무시 + `status="answered"`/`endReason=null` 복원 |
 | `/calls/{cid}` Family `endCall` | (R2) `status="ended"` 만 → `status="ended"` + `endReason="remoteEnded"` 동반 set. Family 가 endReason RTDB writer 로 첫 도입 |
 | `/calls/{cid}` Senior `restoreActiveStatus` | (R2) `updateChildren` → `runTransaction` 가드. status/endReason 이 자기 마커와 일치할 때만 복원 |
+| `/calls/{cid}` Family `setCallCleanupOnDisconnect` | (Plan A) `.remove()` → `.update({status:"ended", endReason:"familyDisconnect"})` 마커 정책 |
+
+### Plan A → Plan B (필드 분리, 현재)
+
+| 변경 | 내용 |
+| --- | --- |
+| `/calls/{cid}/hasFlapMarker` 필드 신규 | wifi flap 신호 전용 별도 필드. server-side onDisconnect 가 자동 set, 자기 wifi 복귀 후 client 가 clear |
+| `/calls/{cid}` server-side onDisconnect | Family/Senior 양측 모두 `hasFlapMarker=true` set (status 안 건드림). Plan A 의 `endReason="familyDisconnect"`/`"seniorDisconnect"` 마커 폐기 |
+| Family `_callEndSub` / Senior `listenForStatus` | endReason 분기 모두 제거. `status="ended"` = 무조건 진짜 종결로 처리 |
+| Family `_flapMarkerSub` / Senior `listenForFlapMarker` 신규 | hasFlapMarker 변경 listener. PC connectionState 기반 자기/상대 마커 구분 (CONNECTED → 자기 마커 clear + onDisconnect 재등록, ≠CONNECTED → 상대 wifi flap → grace 진입) |
+| Senior `restoreActiveStatus` 호출 제거 | status 자체 안 건드리니 복원 불필요 |
+| CF Step 7b stub cleanup | `endReason="familyDisconnect"` 조건 → `hasFlapMarker=true && status!="ended"` 조건으로 변경 |

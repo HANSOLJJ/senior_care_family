@@ -23,25 +23,33 @@
 #   OBSERVE_S      복구 후 관찰 시간 (기본 30s)
 #
 # 사용법:
-#   bash scripts/s2_auto.sh                          # 기본 3s off
-#   FAMILY_OFF_S=1 bash scripts/s2_auto.sh           # 짧은 flap (PC keepalive 자가 복구)
-#   FAMILY_OFF_S=6 bash scripts/s2_auto.sh           # ICE restart 1회 시도 (Senior grace 안)
-#   FAMILY_OFF_S=15 bash scripts/s2_auto.sh          # Senior STOP_DELAY 만료 케이스
-#   FAMILY_OFF_S=70 bash scripts/s2_auto.sh          # 영구 끊김 (networkLost 종결)
+#   bash scripts/s1_3_auto.sh                          # 기본 3s off
+#   FAMILY_OFF_S=1 bash scripts/s1_3_auto.sh           # 짧은 flap (PC keepalive 자가 복구)
+#   FAMILY_OFF_S=6 bash scripts/s1_3_auto.sh           # ICE restart 1회 시도 (Senior grace 안)
+#   FAMILY_OFF_S=15 bash scripts/s1_3_auto.sh          # Senior STOP_DELAY 만료 케이스
+#   FAMILY_OFF_S=70 bash scripts/s1_3_auto.sh          # 영구 끊김 (networkLost 종결)
 
 set +e
-trap 'echo "[S2] cleanup: Family Wi-Fi enable"; adb -s R3CR700SEKP shell svc wifi enable >/dev/null 2>&1' EXIT
+trap 'echo "[S2] cleanup: Family Wi-Fi enable + kill logcat"; adb -s R3CR700SEKP shell svc wifi enable >/dev/null 2>&1; kill $LOGCAT_F_PID $LOGCAT_S_PID 2>/dev/null' EXIT
 
 FAMILY_DEVICE=R3CR700SEKP
 SENIOR_DEVICE=KEP2024120921
 
+# CALL_TYPE: "monitor" (기본) 또는 "call"
+CALL_TYPE=${CALL_TYPE:-monitor}
 MONITOR_BTN_X=795
 MONITOR_BTN_Y=918
+CALL_BTN_X=285        # FamilyDetailScreen "영상통화" 버튼
+CALL_BTN_Y=918
 
 FAMILY_OFF_S=${FAMILY_OFF_S:-3}
 OBSERVE_S=${OBSERVE_S:-30}
+# 안정화 시간 — wifi off 전 대기. CALL_TYPE=call 일 때 senior_accepted_auto + upgrade 완료까지
+# 충분히 길어야 양방향 진행 후 wifi flap 시나리오 (S1~S3 [영상통화]) 검증 가능. 짧으면
+# 1→2 전이 race 시나리오 (S13) 가 검증됨.
+STABILIZE_S=${STABILIZE_S:-5}
 
-LOG_DIR=e:/tmp/s2_auto
+LOG_DIR=e:/tmp/s1_3_auto
 mkdir -p "$LOG_DIR"
 
 PID_F=$(adb -s $FAMILY_DEVICE shell pidof com.seniorcare.family | tr -d '\r')
@@ -69,28 +77,60 @@ fi
 # SnackBar "다시 걸기" 자동 dismiss 대기 (1.5s 자동 dismiss + 마진)
 sleep 2
 
-# Step 1: 모니터링 시작
-BASELINE_F=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | wc -l)
-BASELINE_S=$(adb -s $SENIOR_DEVICE logcat -d --pid=$PID_S 2>/dev/null | wc -l)
-echo "[S2] Tap 모니터링 ($MONITOR_BTN_X,$MONITOR_BTN_Y) @ $(date +%T.%3N)"
-adb -s $FAMILY_DEVICE shell input tap $MONITOR_BTN_X $MONITOR_BTN_Y
+# Step 1: 발신 시작 (CALL_TYPE 분기)
+SUFFIX=${FAMILY_OFF_S}s
+LOG_F="$LOG_DIR/family_${SUFFIX}.log"
+LOG_S="$LOG_DIR/senior_${SUFFIX}.log"
+> "$LOG_F"
+> "$LOG_S"
+
+# logcat background 캡처 (-T 0 = 지금부터 streaming, ring buffer rotation 영향 없음)
+adb -s $FAMILY_DEVICE logcat -v time -T 0 --pid=$PID_F > "$LOG_F" 2>/dev/null &
+LOGCAT_F_PID=$!
+adb -s $SENIOR_DEVICE logcat -v time -T 0 --pid=$PID_S > "$LOG_S" 2>/dev/null &
+LOGCAT_S_PID=$!
+sleep 0.3  # logcat connect 대기
+
+if [ "$CALL_TYPE" = "call" ]; then
+  echo "[S2] Tap 영상통화 ($CALL_BTN_X,$CALL_BTN_Y) @ $(date +%T.%3N)"
+  adb -s $FAMILY_DEVICE shell input tap $CALL_BTN_X $CALL_BTN_Y
+else
+  echo "[S2] Tap 모니터링 ($MONITOR_BTN_X,$MONITOR_BTN_Y) @ $(date +%T.%3N)"
+  adb -s $FAMILY_DEVICE shell input tap $MONITOR_BTN_X $MONITOR_BTN_Y
+fi
 
 CONNECTED=0
 for i in {1..20}; do
   sleep 0.5
-  NEW=$(adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE_F+1)))
-  if echo "$NEW" | grep -q "answer_received"; then
+  if grep -q "answer_received" "$LOG_F" 2>/dev/null; then
     CONNECTED=1
     echo "[S2] FSM connected @ $(date +%T.%3N)"
     break
   fi
 done
 if [ "$CONNECTED" -eq 0 ]; then
-  echo "[S2] ERROR: monitor connect 실패"
+  echo "[S2] ERROR: ${CALL_TYPE} connect 실패"
+  kill $LOGCAT_F_PID $LOGCAT_S_PID 2>/dev/null
   exit 1
 fi
 
-sleep 5  # 안정화
+# CALL_TYPE=call: Senior INCOMING 화면 자동 수락 — onTouchEvent ACTION_DOWN 이 수락 trigger.
+# 화면 1280x800 중앙 (640, 400) 탭. 얼굴인식 대신 ADB 탭으로 즉시 수락.
+if [ "$CALL_TYPE" = "call" ]; then
+  sleep 1.5  # Senior CallActivity INCOMING 화면 띄울 시간
+  echo "[S2] Tap Senior 자동수락 (640,400) @ $(date +%T.%3N)"
+  adb -s $SENIOR_DEVICE shell input tap 640 400
+  # senior_accepted_auto signal 도달 대기 (upgrade 진행 보장)
+  for i in {1..20}; do
+    sleep 0.5
+    if grep -q "senior_accepted_auto\|renegotiate_done" "$LOG_F" 2>/dev/null; then
+      echo "[S2] 영상통화 upgrade 완료 @ $(date +%T.%3N)"
+      break
+    fi
+  done
+fi
+
+sleep $STABILIZE_S  # 안정화
 
 # Step 2: Family Wi-Fi off
 T_OFF=$(date +%T.%3N)
@@ -112,13 +152,13 @@ sleep $OBSERVE_S
 
 sleep 5
 
-# 로그 저장
-SUFFIX=${FAMILY_OFF_S}s
-adb -s $FAMILY_DEVICE logcat -d --pid=$PID_F 2>/dev/null | tail -n +$((BASELINE_F+1)) > "$LOG_DIR/family_${SUFFIX}.log"
-adb -s $SENIOR_DEVICE logcat -d --pid=$PID_S 2>/dev/null | tail -n +$((BASELINE_S+1)) > "$LOG_DIR/senior_${SUFFIX}.log"
+# logcat background 종료 (buffer flush 대기)
+sleep 1
+kill $LOGCAT_F_PID $LOGCAT_S_PID 2>/dev/null
+sleep 0.5
 
-NEW_F="$(cat $LOG_DIR/family_${SUFFIX}.log)"
-NEW_S="$(cat $LOG_DIR/senior_${SUFFIX}.log)"
+NEW_F="$(cat $LOG_F)"
+NEW_S="$(cat $LOG_S)"
 
 echo "[S2] === RESULT ==="
 
@@ -187,11 +227,17 @@ esac
 
 echo ""
 echo "[S2] Logs:"
-echo "  $LOG_DIR/family_${SUFFIX}.log"
-echo "  $LOG_DIR/senior_${SUFFIX}.log"
+echo "  $LOG_F"
+echo "  $LOG_S"
 
-# Cleanup: 모니터링 살아있으면 종료. SnackBar "다시 걸기" 가 떠 있을 수도 있으나 1.5s 자동 dismiss.
-adb -s $FAMILY_DEVICE shell input tap 768 2202 >/dev/null 2>&1
+# Cleanup: CALL_TYPE 별 종료 버튼 좌표 분기
+# - monitor: 빈 영역 탭 (모니터링 자동 종료) — (768, 2202)
+# - call: 영상통화 종료 버튼 — (540, 2202) bounds=[330,2124][750,2280]
+if [ "$CALL_TYPE" = "call" ]; then
+  adb -s $FAMILY_DEVICE shell input tap 540 2202 >/dev/null 2>&1
+else
+  adb -s $FAMILY_DEVICE shell input tap 768 2202 >/dev/null 2>&1
+fi
 sleep 2
 
 echo "[S2] === DONE ==="

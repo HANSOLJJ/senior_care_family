@@ -173,7 +173,8 @@ sequenceDiagram
 | `remoteBusy` | ✅ | Senior `rejectCall` | Senior 다른 통화 중 | connecting→terminating | 통화 중 |
 | `capacityExceeded` | ✅ | Senior `rejectCall` | Senior MAX_PEERS(3) 초과 | connecting→terminating | 모니터링 한도 초과 |
 | `otherCallStarted` | ✅ | Senior `rejectCall` | 모니터링 중 Senior 가 call 수락 → displace | connected→terminating | 모니터링이 종료되었습니다 |
-| `seniorDisconnect` | ✅ | Server-side onDisconnect (S16 fix) | Senior wifi 끊김 (자발적 flap 떠받치기 마커) | grace 15s 대기 → 복구 시 무효화 / grace 만료 시 `remoteEnded` 로 종결 | (UI 변경 없음 — grace 동안 reconnecting 오버레이 유지) |
+| ~~`seniorDisconnect`~~ | ❌ (Plan B 폐기) | Server-side onDisconnect (S16 fix, Plan A 까지) | Plan B 에서 `hasFlapMarker` 별도 필드로 대체. status 안 건드림. | — | — |
+| `hasFlapMarker` (필드, Plan B) | ✅ | Server-side onDisconnect (양측) | Family/Senior wifi 끊김 시 자동 set. status 무관. | 별도 listener 가 grace 분기 — PC=CONNECTED 면 자기 마커 clear, ≠CONNECTED 면 상대 wifi flap → grace 진입 | (UI 변경 없음) |
 | `userHangup`, `networkOffline`, `upgradeFailed`, `endedByOtherCall` | ❌ | (Family 내부 enum 만) | 다양 — Family `_mapEndReason` 또는 자체 hangUp reason | 다양 | 다양 |
 
 **주요 차이점 (vs 원본 §10)**:
@@ -185,30 +186,46 @@ sequenceDiagram
 
 원본 §10-1, §10-2, §10-3 과 동일. 변경 없음.
 
-### 10-4. `seniorDisconnect` 상세 (KEP WiFi flap 떠받치기, S16 fix — Revision)
+### 10-4. `hasFlapMarker` 상세 (Plan B — wifi flap 신호 별도 필드)
 
-**발생 조건**: 원본과 동일.
+**Plan B 핵심 변경**: Plan A 의 `endReason="familyDisconnect"`/`"seniorDisconnect"` 마커 폐기 →
+`hasFlapMarker=true` 별도 필드 도입. `status` 는 정상 종결만 변경 → 모든 listener 가
+endReason 분기 없이 처리 가능 (race 폭발 해결).
 
-**Senior server-side 동작**: 원본과 동일.
+**발생 조건**:
+- Family 또는 Senior wifi 끊김 → Firebase server-side onDisconnect 가 `hasFlapMarker=true` 자동 set.
 
-**Senior 자기 측 동작** (wifi 복구 후): 원본과 동일.
+**Family 동작** ([webrtc_service.dart](../lib/services/call/webrtc_service.dart)):
 
-**Family 동작** ([webrtc_service.dart:_callEndSub](../lib/services/call/webrtc_service.dart)):
+신규 `_flapMarkerSub` 리스너가 hasFlapMarker 변경 감지 → PC connectionState 기반 자기/상대 마커 구분.
 
-`endReason="seniorDisconnect"` 수신 시 즉시 hangUp 안 함 → `_seniorDisconnectGraceTimer` 15초 시작.
+- **PC=CONNECTED**: 자기 마커 추정 (wifi 복귀 후 자기가 set 한 마커가 RTDB 에서 도달).
+  → `clearFlapMarker(callId)` + `setCallCleanupOnDisconnect(callId)` (재등록).
+- **PC≠CONNECTED**: 상대 (Senior) wifi flap 추정.
+  → 별도 timer 안 둠 — PC keepalive 가 곧 끊김 인지 → `_onPeerConnectionStateChanged` →
+    grace 4s + ICE restart 1회 시도 자체 흐름 위임.
 
-- grace 만료 전 PC CONNECTED 복귀 시: 통화 유지 (timer 자동 cancel)
-- grace 만료 시 PC CONNECTED 면: 통화 유지
-- grace 만료 시 PC 미복구: `hangUp(remoteEnded)` 종결
+**Senior 동작** ([MonitoringSession.kt](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt)):
 
-**복구 가능 한계** (Revision 후):
-- Senior wifi off **1~4초**: ICE restart 1회 시도로 복구 가능 (떠받침)
-- Senior wifi off **5~12초**: Senior PC keepalive timeout (5s) + STOP_DELAY (7s) 가 ICE restart 보다 먼저 발화 → grace 안에 복구 못하고 `remoteEnded` 종결 (원본과 동일)
-- **12초 초과**: wifi 복구 전 Senior 자체 종결 (원본과 동일)
+신규 `listenForFlapMarker` 리스너가 hasFlapMarker 변경 감지 → 동일 PC state 분기.
 
-검증 결과는 [ICE_restart_test_result.md S16](./ICE_restart_test_result.md#s16--senior-측-wi-fi-단절) 참조.
+- **PC=CONNECTED**: 자기 마커 → clear + onDisconnect 재등록 (`registerDisconnectCleanup` 재호출).
+- **PC≠CONNECTED**: 상대 (Family) wifi flap → `scheduleStopPeer(callId, STOP_DELAY_MS=7s)`. ICE restart offer 도착 시 cancel.
 
-**주요 차이점 (vs 원본 §10-4)**: "ICE restart 자연 진입으로 복구" → "ICE restart 1회 시도로 복구" wording 만 갱신. 동작은 동일 (1회 시도라도 KEP drop 같은 짧은 단절 떠받침).
+**복구 가능 한계**:
+- Family wifi off **1~6초** [모니터링/영상통화]: ICE restart 1회 시도로 복구 (떠받침)
+- Family wifi off **15초+**: Family ICE restart 시점 wifi 아직 off → networkLost 정상 종결
+- Senior wifi off **1~4초**: ICE restart 1회 시도로 복구 (떠받침)
+- Senior wifi off **5초+**: Senior PC keepalive timeout + STOP_DELAY 7s 만료 → networkLost 정상 종결
+
+**Plan A 대비 race 해결**:
+- 영상통화 1→2 전이 시 race (S13) — Plan A 에서는 status="ended" + endReason="familyDisconnect" 마커가
+  upgradeToCall 의 RTDB write 를 막아서 noAcceptance 종결 발생. Plan B 는 status="active" 그대로 유지 →
+  upgrade 정상 진행 → race 사라짐.
+- 사용자 hangup 시 Senior 가 늦게 종결되던 race — Plan A 에서는 active 복원 비동기 vs hangup 동시 race.
+  Plan B 는 status 자체 안 건드리니 복원 불필요 → race 사라짐.
+
+검증 결과는 [ICE_restart_test_result.md](./ICE_restart_test_result.md) 참조.
 
 ---
 

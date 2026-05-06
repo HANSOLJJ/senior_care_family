@@ -155,6 +155,38 @@ firebase deploy --only functions
 - `https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupOrphanedDataManual`
 - `https://us-central1-dcom-smart-frame.cloudfunctions.net/cleanupExpiredPhotosManual`
 
+## ICE Restart 테스트 진행 방식
+
+자동화 스크립트 (`scripts/s1_3_sweep.sh`, `scripts/s4_5_sweep.sh` 등) 의 **자체 분류 ✅/⚠ 결과는 신뢰 못 함**. 이유:
+- logcat PID 가 sweep 동안 동일 → 모든 stage 의 로그가 buffer 에 누적, BASELINE 잘라내기로 stage 분리 보장 못 함
+- 분류 로직이 `ice_restored` count 만 봄 → 1차 복구 후 자가 disconnect 발생해도 ✅ 표시
+- observation 25s 이후 발생하는 일은 캡처 안 됨
+
+### 정확한 진행 방식
+
+1. **Family + Senior 양쪽 logcat 전체 → 파일에 background 캡처** (filter 없이):
+   ```bash
+   adb -s R3CR700SEKP logcat -v time > e:/tmp/0430_ICE_RESTART/family.log &
+   adb -s KEP2024120921 logcat -v time > e:/tmp/0430_ICE_RESTART/senior.log &
+   ```
+2. sweep 실행 (background)
+3. **사용자가 화면에서 stage 별 결과 직접 확인 + 알려줌** — 실측이 ground truth
+4. 의문 시 logcat 파일에서 timestamp 매칭으로 grep — 사후 분석은 보조 확인용
+
+### 절대 하지 말 것
+
+- 스크립트의 ✅/⚠ 결과를 그대로 사용자에게 PASS/FAIL 로 보고
+- BASELINE 으로 잘라낸 stage logcat 만 보고 결과 단정
+- TaskStop 한 번 호출 후 "중단됨" 으로 단정 (child sub-bash 가 살아있을 수 있음)
+
+### Sweep 강제 중단
+
+`TaskStop` 만으로는 child 프로세스 안 죽음. 확실히:
+```bash
+taskkill //F //FI "IMAGENAME eq bash.exe" //FI "USERNAME eq noble"
+```
+이후 ADB wifi enable 으로 cleanup.
+
 ## 주요 문서
 
 - `docs/RTDB_schema.md` — RTDB 전체 스키마
