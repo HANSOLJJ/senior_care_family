@@ -311,21 +311,45 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 
 상세 시퀀스는 [§13 1:N × 1:1 정책 흐름](#13-1n--11-정책-흐름) 참조.
 
-### 10-2. `remoteBusy` 상세 (call 배타 정책)
+### 10-2. `remoteBusy` 상세 (call 진행 중 신규 peer 전체 차단 정책)
 
-**발생 조건**: Senior 가 이미 `callType="call"` 로 통화 중 → 다른 Family 가 call 발신.
+**발생 조건**: Senior 가 이미 `callType="call"` 로 통화 중 → 다른 Family 가 **call 또는 monitor 발신**.
 
-**Senior 동작**: 새 call offer 도달 시 기존 call 존재 감지 → `rejectCall(..., REMOTE_BUSY)` → RTDB `endReason="remoteBusy"` write. 기존 call peer 는 영향 없음.
+**정책**: 영상통화 (call) 진행 중에는 **신규 call 뿐 아니라 신규 monitor 도 모두 거절** ([MonitoringSession.kt:436-448](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L436-L448)).
 
-**Family 동작** (새 call 발신자): `_mapEndReason("remoteBusy") → TerminateReason.remoteBusy` → 다이얼로그 "{Senior 이름}이(가) 통화 중입니다 / 다른 가족이 통화 중입니다. 잠시 후 다시 시도해주세요." → pop.
+- 이유: call 의 양방향 audio/video 라우팅과 새 monitor peer 의 broadcast fan-out 이 충돌. 깔끔한 격리 위해 call 동안 모든 신규 peer 차단.
+- 호환: 영상통화 종료 후 자동으로 신규 monitor/call 다시 받음.
+
+**Senior 동작**: 새 call/monitor offer 도달 시 기존 call 존재 감지 → `rejectCall(..., REMOTE_BUSY)` → RTDB `endReason="remoteBusy"` write. 기존 call peer 는 영향 없음.
+
+**Family 동작** (새 발신자): `_mapEndReason("remoteBusy") → TerminateReason.remoteBusy` → 다이얼로그 "{Senior 이름}이(가) 통화 중입니다 / 다른 가족이 통화 중입니다. 잠시 후 다시 시도해주세요." → pop.
+
+**핵심**: 차단 시점은 **INCOMING 단계부터** (수락 전부터). 즉 첫 번째 call 발신자가 INCOMING 화면 표시되는 순간부터 모든 신규 요청 (call/monitor) 거절. 결과적으로 **call peer 는 동시에 최대 1개**.
 
 ### 10-3. `capacityExceeded` 상세 (MAX_PEERS=3)
 
-**발생 조건**: Senior 가 이미 monitor peer 3개 운영 중 → 4번째 Family 가 monitor 발신.
+**발생 조건**: Senior 가 이미 **monitor peer** 3개 운영 중 → 4번째 Family 가 monitor 발신.
 
 **Senior 동작**: peers 카운터 3 초과 감지 → `rejectCall(..., CAPACITY_EXCEEDED)` → RTDB `endReason="capacityExceeded"` write.
 
 **Family 동작**: `_mapEndReason("capacityExceeded") → TerminateReason.capacityExceeded` → 다이얼로그 "모니터링 한도 초과" → pop.
+
+**주의**: MAX_PEERS=3 은 **monitor 에만 적용**. call 은 별개 제약 ([MonitoringSession.kt:452-457](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L452-L457)).
+
+- 즉 monitor 3개 active 상태에서 call 1개 발신 → 허용 → **일시 peer=4** (INCOMING 단계, 최대 30s)
+- INCOMING 도중 다른 신규 요청 (5번째) → §10-2 remoteBusy 거절
+- 수락 시 `displaceOtherMonitors()` → monitor 3개 모두 `otherCallStarted` 거절 → peer=1 (call only)
+- 수락 안 됨 (30s 타임아웃) → status="ended" → peer=3 (monitor 그대로)
+
+### 10-3-1. Capacity 정책 종합 매트릭스
+
+| 현재 상태 | new monitor 요청 | new call 요청 |
+| --- | --- | --- |
+| 진행 중 call (INCOMING/IN_CALL) | ❌ remoteBusy | ❌ remoteBusy |
+| monitor peers ≥ 3 (call 없음) | ❌ capacityExceeded | ✅ 허용 (일시 peer=4) |
+| monitor peers < 3, call 없음 | ✅ 허용 | ✅ 허용 |
+
+**불변량**: `call peer ≤ 1` (항상). `monitor peer ≤ 3` (항상). 동시 최대 peer = 4 (3 monitor + 1 call INCOMING, max 30s).
 
 ### 10-4. `seniorDisconnect` 상세 (KEP WiFi flap 떠받치기, S16 fix)
 

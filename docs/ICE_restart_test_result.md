@@ -16,6 +16,8 @@
 | 2026-05-06 | Plan B v2 확장 — S6 sweep 신규 + S7 SENIOR_OFFLINE mode 추가 + S8 모니터링/영상통화 + S13 (Plan B 핵심 race) | 자동화 sweep + raw logcat 매칭 |
 | 2026-05-06 | code review fix — `_flapMarkerSub` 콜백 re-register 순서 차단 + clearFlapMarker raw remove (writeOrTimeout 노이즈 제거) + Plan B narration 주석 정리 | s1_3 + s1_3_call + s4_5 + s4_5_call sweep 5/5 PASS |
 | 2026-05-07 | iOS Sol2 검증 (S4 모니터링 + S4_5 영상통화) | Mac Mini SSH + flutter.log 실시간 매칭 |
+| 2026-05-07 | iOS S1_3 (Family wifi flap) 검증 + PC keepalive reconnect / ICE restart NetworkException race 발견 + fix (`webrtc_service.dart` PC=CONNECTED skip) | iOS Sol2 수동 wifi 토글 |
+| 2026-05-07 | 1:N S9~S12 검증 + capacity 정책 매트릭스 doc 정합화 (`call-scenarios.md §10-2/10-3/10-3-1`) | Android A + iOS B + Android C 3대 |
 
 ### Plan B 핵심
 
@@ -214,9 +216,51 @@
 
 ---
 
-## S9~S12 (1:N, 미검증)
+## S9~S12 (1:N) — 다중 Family 검증 (2026-05-07)
 
-- 다중 Family 디바이스 필요. Sol2 (iOS) + R3CR700SEKP (Android) 조합으로 수동 검증 가능.
+### 디바이스 매핑
+
+- **Family A** = R3CR700SEKP (Android, Galaxy S21)
+- **Family B** = Sol2 (iOS, Mac Mini SSH 통한 flutter.log 모니터링)
+- **Family C** = RFKYA00Y49L (Android, Galaxy A17) — S12 추가
+- **Senior** = KEP2024120921
+
+### S9 — Family A wifi off 15s + Family B 영향 없음
+
+- **흐름**: A + B 동시 모니터링 → A wifi off 15s → wifi on
+- **결과**:
+  - Family A: `pc_disconnected` → grace 4s → ICE restart NetworkException → `hangup:networkLost` 종결 (`12:26:08`)
+  - Family B (Sol2): 영향 0, FSM 이벤트 없음 (steady state 유지)
+  - Senior: A peer ENDED dispose, **남은 peers=1** (B 그대로)
+- **결론**: ✅ PASS — 1:N 독립성 검증
+
+### S10 — Family A wifi off 70s (S9 long version)
+
+- **흐름**: A + B 동시 모니터링 → A wifi off 70s → wifi on
+- **결과**: S9 와 동일 패턴 (Family A networkLost / B 유지 / Senior 남은 peers=1)
+- **결론**: ✅ PASS — long 끊김에도 1:N 독립성 유지
+
+### S11 — Family A 영상통화 IN_CALL + Family B 신규 시도 거절
+
+- **흐름**: A 영상통화 발신 → Senior ADB tap 수락 → A IN_CALL → B 영상통화 + 모니터링 시도
+- **결과**:
+  - Family B 영상통화: `endReason=remoteBusy` 즉시 거절 (0.7초)
+  - Family B 모니터링: **`endReason=remoteBusy`** 도 거절 (call 진행 중 신규 peer 전체 차단 정책)
+  - Family A: IN_CALL 영향 없음 (steady state 유지)
+- **결론**: ✅ PASS — call 진행 중 신규 peer 차단 정책 검증
+- **doc 갱신**: [call-scenarios.md §10-2/10-3/10-3-1](call-scenarios.md) 에 capacity 정책 종합 매트릭스 추가
+
+### S12 — Capacity 매트릭스 검증 (peers=3 + call 발신)
+
+- **흐름**: A + B + C 동시 모니터링 (peers=3) → 추가 발신 시도
+- **결과**:
+  - 4번째 monitor 시도: `capacityExceeded` ✅
+  - 4번째 call 시도: ✅ 허용 (일시 peer=4, INCOMING 단계)
+  - 5번째 시도 (call/monitor 모두): `remoteBusy` (§10-2 정책)
+- **결론**: ✅ PASS — Capacity 정책 매트릭스 모두 검증
+  - `monitor peer ≤ 3` (MAX_PEERS=3)
+  - `call peer ≤ 1` (배타)
+  - 동시 max peer = 4 (3 monitor + 1 call INCOMING, max 30s)
 
 ---
 
@@ -314,6 +358,30 @@ faceDetectionSink = FaceDetectionVideoSink {
 - **결론**: ✅ Plan B race 가 아닌 wifi flap 자체의 Senior STOP_DELAY 7s vs PC reconnect timing race. Android 와 동일 패턴 (s4_5/s4_5_call 에서 4s/5s 도 동일 boundary).
 - **테스트 인프라 변경**: Senior 영상통화 noise 차단 위해 MonitoringSession `onTrack` 에서 remote AudioTrack `setEnabled(false)` + RingtonePlayer `setVolume(0f, 0f)` 적용 (테스트 mute 정책)
 
+### S1_3 [영상통화] — iOS (Sol2) — Family wifi flap
+
+- **실행**: 사용자 수동 wifi 토글 (다수 사이클), Senior 자동수락 ADB tap
+- **버그 발견**: ~5초 wifi off 시 `hangup:networkLost` 종결 — 사용자 보고 "마지막에 소리가 다시 났는데 세션이 꺼졌음"
+- **원인**: PC keepalive 자체 reconnect 와 ICE restart offer 전송 race
+  - Family wifi off → PC disconnect → grace 4s → ICE restart 시도
+  - 도중 PC keepalive 가 자체 reconnect → CONNECTED (`ice_restored` 보고됨)
+  - 하지만 동시에 `setLocalDescription` / `_signaling.requestIceRestart` 가 wifi off 중에 NetworkException 으로 실패
+  - 기존 catch 가 무조건 `hangUp(networkLost)` → PC 복구됐는데도 통화 종결
+- **Fix** (`webrtc_service.dart` `_triggerIceRestart`):
+  - catch 에서 PC=CONNECTED 면 networkLost skip — `WebRTC: ICE restart 실패했지만 PC=CONNECTED → networkLost skip: NetworkException`
+  - 동일 패턴: `_iceRestartAnswerTimer` timeout 에서도 PC=CONNECTED 면 skip
+- **검증 결과**: ✅ Fix 발화 확인 — 동일 race 재현 시 통화 유지
+
+  ```text
+  pc_disconnected → reconnecting
+  ICE restart 1회 시도 시작
+  reconnecting → connected (ice_restored)        ← PC 자체 reconnect
+  ICE restart 실패했지만 PC=CONNECTED → networkLost skip: NetworkException
+  ICE restart answer 적용 완료                   ← ICE restart 도 결국 성공
+  ```
+
+- **결론**: ✅ iOS Family wifi flap race 해결. Android 에선 PC keepalive timing 차이로 race 자체가 안 발생 — 검증 시 확인 안 됨 (5/5 PASS, no regression).
+
 ---
 
 ## 요약
@@ -328,10 +396,13 @@ faceDetectionSink = FaceDetectionVideoSink {
 | S6 (upgrade flap) | — | ✅ PASS (Android, 4 stages) | 영상통화 완료 |
 | S7 (connecting flap) | — | ✅ PASS (Android, 2 modes) | 영상통화 완료 |
 | S8 (R2 race) | ✅ PASS (Android) | ✅ PASS (Android) | 양 모드 완료 |
-| S9~S12 (1:N) | (미검증) | (미검증) | 다중 디바이스 필요 |
+| S9 (1:N short flap) | ✅ A networkLost / B 유지 | — | 검증 완료 |
+| S10 (1:N long flap) | ✅ S9 long version | — | 검증 완료 |
+| S11 (call remoteBusy) | — | ✅ A IN_CALL / B remoteBusy | call+monitor 모두 거절 |
+| S12 (capacity 매트릭스) | ✅ peers≤3, call≤1 | ✅ 일시 peer=4 허용 | 정책 검증 + doc 갱신 |
 | **S13 (1→2 race)** | — | ✅ **8/8 PASS (Plan B 핵심)** | 영상통화 완료 |
 | iOS S4 (Sol2) | ✅ 8/8 PASS | ✅ 7/8 PASS (6s boundary timing) | 양 모드 완료 |
-| iOS S1~S3 (Family wifi flap) | (미검증) | (미검증) | iOS 수동 wifi 토글 필요 |
+| iOS S1_3 (Sol2 wifi flap) | — | ✅ PASS + race fix 검증 | 영상통화 완료 (PC reconnect race 발견 + 차단) |
 
 ---
 

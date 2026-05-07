@@ -89,9 +89,11 @@ Senior 기기의 모든 정보를 담는 유일한 출처 (single source of trut
 - **정리**: 10초 내 Family 앱 종료 시 고아 노드 잔존 → `cleanupOrphanedData` CF 가 매일 정리
 - **1:N × 1:1 정책 (Senior 측 강제)**:
   - monitor N개 동시 허용 (상한 `MAX_PEERS=3`, 초과 시 `endReason=capacityExceeded`)
-  - call 은 1개 배타 (기존 call 이 있으면 `endReason=remoteBusy`)
+  - call 은 1개 배타 — **call 진행 중 (INCOMING/IN_CALL) 신규 call/monitor 모두 `endReason=remoteBusy` 거절**
+  - call 발신은 MAX_PEERS 와 별개 — monitor peers=3 상태에서도 call 1개 추가 가능 (일시 peer=4, INCOMING 단계)
   - call 수락 시 기존 monitor peer 들 자동 displace (`endReason=otherCallStarted`)
-  - 상세: [docs/call-scenarios.md §13](call-scenarios.md)
+  - 불변량: `monitor peer ≤ 3`, `call peer ≤ 1`, 동시 max peer = 4
+  - 상세: [docs/call-scenarios.md §10-2/10-3/10-3-1, §13](call-scenarios.md)
 
 ### Writer 매트릭스
 

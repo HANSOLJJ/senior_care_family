@@ -353,32 +353,51 @@ bash e:/App/Family/scripts/s8_call_auto.sh    # 영상통화 케이스
 
 ---
 
-### S11 — Call 중 remoteBusy
+### S11 — Call 진행 중 신규 peer 전체 차단 (remoteBusy)
 
-**사전 조건**: Family A 가 이미 영상통화 중 (callType="call").
+**사전 조건**: Family A 가 이미 영상통화 중 (callType="call", INCOMING 또는 IN_CALL).
 
 **재현 (수동)**:
+
 1. Family A 가 영상통화 시작 → IN_CALL
-2. Family B 가 같은 Senior 에 영상통화 시도
+2. Family B 가 같은 Senior 에 **영상통화 또는 모니터링** 시도
 
 **기대 동작**:
-- Family B `endReason="remoteBusy"` 즉시 받음
+
+- Family B `endReason="remoteBusy"` 즉시 받음 (call/monitor 둘 다)
 - Family B "Senior 가 통화 중입니다" 다이얼로그 → pop
 - Family A 통화 영향 없음
 
-**PASS 판정**: A 통화 유지, B 거절.
+**PASS 판정**: A 통화 유지, B 거절 (call + monitor 모두).
+
+> 정책: call 진행 중에는 신규 peer 전체 차단 — 자세한 배경은 [call-scenarios.md §10-2](./call-scenarios.md).
 
 ---
 
-### S12 — 4번째 monitor → capacityExceeded
+### S12 — Capacity 매트릭스 (MAX_PEERS=3 + call 별개)
 
-**사전 조건**: Family A, B, C 가 같은 Senior 모니터링 중 (peers=3, MAX_PEERS).
+**사전 조건**: Family A, B, C 가 같은 Senior 모니터링 중 (`monitor peers=3, MAX_PEERS`).
 
-**재현 (수동)**: Family D 가 모니터링 시도.
+**재현 (수동)**:
 
-**기대 동작**: D `endReason="capacityExceeded"` 즉시 거절. A/B/C 영향 없음.
+1. Family D 가 **모니터링** 시도 → `capacityExceeded` 거절
+2. Family D 가 **영상통화** 시도 → 허용 (일시 peer=4, INCOMING 단계 max 30s)
+3. peer=4 상태에서 5번째 시도 → `remoteBusy` (S11 정책)
 
-**PASS 판정**: D 거절, A/B/C 모니터링 유지.
+**기대 동작**:
+
+- 4번째 monitor → `endReason="capacityExceeded"`
+- 4번째 call → 허용 (peer=4 일시) → 수락 시 `displaceOtherMonitors()` → 기존 monitor 3개 `otherCallStarted` 거절 → peer=1 (call only)
+- 미수락 30s 타임아웃 → call 노드 status="ended" → peer=3 (monitor 그대로)
+
+**PASS 판정**:
+
+- monitor `capacityExceeded` ✅
+- call 허용 (peer=4) ✅
+- 5번째 모두 `remoteBusy` ✅
+- 불변량: `monitor peer ≤ 3`, `call peer ≤ 1`
+
+> 자세한 매트릭스: [call-scenarios.md §10-3-1](./call-scenarios.md).
 
 ---
 
