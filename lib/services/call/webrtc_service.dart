@@ -114,8 +114,7 @@ class WebRtcService {
   /// ICE restart answer 감시 구독 (`iceRestartAnswer`)
   StreamSubscription? _iceRestartAnswerSub;
 
-  /// hasFlapMarker 감시 구독 (Plan B — 필드 분리 모델)
-  /// 자기 마커 받으면 clear + onDisconnect 재등록.
+  /// hasFlapMarker 감시 구독. 자기 마커 받으면 clear + onDisconnect 재등록.
   StreamSubscription? _flapMarkerSub;
 
   // ─── ICE candidate 큐 / 경로 ───
@@ -621,10 +620,10 @@ class WebRtcService {
 
   // ─── 시그널링 리스너 통합 등록 (3개 발신 메서드 공통) ───
 
-  /// (`Method`) callId 확정 후 answer/candidates/callEnd/iceRestartAnswer 4종 구독 등록
+  /// (`Method`) callId 확정 후 answer/candidates/callEnd/flapMarker/iceRestartAnswer 5종 구독 등록
   ///
   /// 모든 구독은 인스턴스 필드에 보관되어 [hangUp]에서 일괄 cancel.
-  /// - **Side Effects**: `_answerSub`/`_calleeCandidatesSub`/`_callEndSub`/`_iceRestartAnswerSub` 세팅
+  /// - **Side Effects**: `_answerSub`/`_calleeCandidatesSub`/`_callEndSub`/`_flapMarkerSub`/`_iceRestartAnswerSub` 세팅
   /// - **호출**: [makeCall], [startMonitoring], [startCall]
   void _registerSignalingListeners(String callId) {
     _answerSub?.cancel();
@@ -656,26 +655,24 @@ class WebRtcService {
       ));
     });
 
-    // Plan B (필드 분리): status="ended" = 무조건 진짜 종결. endReason 분기 없음.
-    // wifi flap 신호는 hasFlapMarker 별도 필드로 분리 → _flapMarkerSub 가 담당.
     _callEndSub = _signaling.listenForCallEnd(callId, (endReason) {
       if (_isEnding) return;
       hangUp(reason: _mapEndReason(endReason));
       onCallEnded?.call();
     });
 
-    // hasFlapMarker — Plan B (필드 분리). 자기/상대 마커 구분은 PC connectionState 로:
-    // - PC=CONNECTED: 자기 마커 추정 (wifi 복귀 후 RTDB 에서 자기 마커 도달) → clear + 재등록.
-    // - PC=DISCONNECTED 등: 상대 (Senior) wifi flap 추정 → 별도 timer 안 둠. PC keepalive
-    //   가 곧 끊김 인지 → _onPeerConnectionStateChanged → grace 4s + ICE restart 자체 흐름 위임.
+    // 자기/상대 마커 구분은 PC connectionState 기반:
+    // - PC=CONNECTED: 자기 마커 (wifi 복귀 후 RTDB 에서 자기 마커 도달) → clear + 재등록.
+    // - 그 외: 상대 wifi flap → _onPeerConnectionStateChanged 의 grace + ICE restart 위임.
     _flapMarkerSub = _signaling.listenForFlapMarker(callId, (hasFlap) async {
       if (_isEnding) return;
       if (!hasFlap) return;
       final pcState = _peerConnection?.connectionState;
       if (pcState == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
         print('WebRTC: 자기 hasFlapMarker (PC=CONNECTED) → clear + onDisconnect 재등록');
-        await _signaling.clearFlapMarker(callId);
+        // 재등록 먼저 — clear 와의 사이에 새 flap 발생해도 onDisconnect 가 살아있도록.
         await _signaling.setCallCleanupOnDisconnect(callId);
+        await _signaling.clearFlapMarker(callId);
       } else {
         print('WebRTC: hasFlapMarker (PC=$pcState) → 상대 wifi flap 추정, ICE restart 흐름 위임');
       }

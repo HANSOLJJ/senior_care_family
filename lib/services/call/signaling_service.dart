@@ -245,10 +245,8 @@ class SignalingService {
 
   /// (`Method`, async) 통화 응답 시 onDisconnect 설정 (비정상 종료 대비)
   ///
-  /// 앱이 비정상 종료 (wifi 끊김 / 앱 크래시) 되면 RTDB가 자동으로 wifi flap 신호 set.
-  /// **Plan B (필드 분리)**: `status` 가 아닌 `hasFlapMarker` 별도 필드 사용.
-  /// `status` 변경은 정상 종결만 의미 → 모든 listener 가 endReason 분기 없이 처리 가능.
-  /// Senior 측 listenForFlapMarker 가 grace 진입 담당.
+  /// 앱이 비정상 종료 (wifi 끊김 / 앱 크래시) 되면 RTDB 가 hasFlapMarker=true set.
+  /// 상대 측 listenForFlapMarker 가 grace 진입을 담당.
   /// - **Params**:
   ///   - [callId] — 통화 ID
   /// - **Side Effects**: RTDB onDisconnect 핸들러 등록 (hasFlapMarker=true)
@@ -262,8 +260,9 @@ class SignalingService {
 
   /// (`Method`, async) wifi 복귀 후 자기 hasFlapMarker clear
   ///
-  /// Family 가 wifi 끊겨서 Firebase 가 hasFlapMarker=true set 했으나, wifi 복귀
-  /// 후 통화 살아있음. 자기 마커를 clear 해서 Senior 의 grace timer 를 cancel 시킴.
+  /// 자기 마커를 clear 해서 상대 grace timer 를 cancel 시킴.
+  /// best-effort — 실패해도 Senior 측 자체 clear + CF stub cleanup 으로 회복.
+  /// RTDB SDK 가 reconnect 시 자동 재전송하므로 writeOrTimeout 불필요.
   /// - **Params**:
   ///   - [callId] — 통화 ID
   /// - **Side Effects**: RTDB hasFlapMarker 필드 제거

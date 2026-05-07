@@ -441,13 +441,10 @@ async function doOrphanCleanup({ aggressive = false } = {}) {
         continue;
       }
 
-      // (b) Stub 노드 정리 (callerUid 없음 = 정상 createCall 거치지 않음)
-      // - 정상 createCall 은 callerUid + createdAt 등을 atomic set 하므로 callerUid 없으면 stub 확정
-      // - push id timestamp 가 5분 전 이상이면 정리 (정상 push 직후 race 회피)
-      // (b2) Plan B (필드 분리) — hasFlapMarker 잔존 stub:
-      // - 양측 wifi 끊긴 채 영영 복구 못 한 케이스. status 는 active 그대로 + hasFlapMarker=true.
-      // - 정상 흐름: Senior STOP_DELAY 가 status="ended" 강제 set + removeValue 로 정리.
-      // - edge: 양측 다 영영 끊김 → 노드 잔존 → 5분 후 정리.
+      // (b) Stub 노드 정리 — 5분 grace 후 두 종류 정리:
+      // - !callerUid: 정상 createCall 거치지 않은 노드 (atomic set 흔적 없음)
+      // - hasFlapMarker=true && status!=ended: 양측 wifi 끊긴 채 복구 실패한 잔존 노드
+      //   (정상 흐름은 Senior STOP_DELAY 만료 시 status="ended" set + remove 로 정리됨)
       const hasFlapMarker = data.hasFlapMarker === true;
       const isFlapMarkerStub = hasFlapMarker && status !== "ended";
       if (!callerUid || isFlapMarkerStub) {
