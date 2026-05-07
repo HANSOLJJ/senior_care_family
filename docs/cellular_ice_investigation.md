@@ -1,8 +1,8 @@
-# Cellular handoff + ICE 제약 진단 (TURN 서버 필요성)
+# Cellular handoff + ICE 제약 진단
 
 > 발견 일자: 2026-05-07
 > 디바이스: Galaxy A17 (RFKYA00Y49L) cellular 환경
-> 결론: A17 cellular handoff 시 video 검은 화면 — carrier NAT 로 P2P UDP 불가 — **TURN relay 서버 필요**
+> 결론: cellular **fresh start 는 정상 작동**. wifi → cellular **handoff 중에만** 영상 검은 화면 발생 — Senior 측 stale ICE state + libwebrtc handoff 동작 의심. **TURN relay 서버로 우회 가능** (handoff 시 relay path 강제).
 
 ---
 
@@ -180,14 +180,33 @@ ICE check:
 
 확정하려면 iOS Sol 의 통신사 + APN 확인 필요.
 
-### 2.6 왜 처음 cellular fresh start 는 됐을까? (사용자 검증)
+### 2.6 cellular fresh start 는 잘 됨 — handoff 만 문제
 
-가설:
-- **NAT mapping 운 좋게 일치** — fresh 시 carrier 가 일관된 port 쓸 수도 (구현 따라)
-- **STUN binding 안정성 차이** — 첫 시도엔 mapping 이 정착되어 ping 통과
-- **시점/위치 의존** — cell tower handoff, 트래픽 부하에 따라 NAT 동작 다름
+사용자 검증 (다회):
 
-cellular only 가 항상 되는 건 아님. **신뢰성 없음** = production blocker.
+- A17 cellular only fresh 모니터링/영상통화 → **정상 작동**
+- iOS Sol cellular only fresh → **정상 작동**
+
+→ A17 의 carrier NAT 가 진짜 fully symmetric 이라면 fresh 도 안 됐어야. 따라서 carrier NAT 가 P2P 막는 건 아니고, 다른 메커니즘 의심:
+
+**가능 원인 (handoff 한정)**:
+
+1. **Senior 측 stale state** — Family 의 wifi candidate 와 mapping 됐던 ICE state 가 ICE restart 후에도 cellular candidate 로 깨끗이 전환 안 됨. libwebrtc bug 또는 Senior 측 PC 가 "old candidate 와 통신 가능" 상태로 잘못 유지.
+2. **A17 OS network state 일시 stuck** — wifi off 직후 Android network stack 이 cellular 라우팅 안정화 전 ICE restart 시도. 이 사이 STUN/RTP 패킷 손실.
+3. **NAT mapping 시간차** — 새 cellular srflx candidate 가 STUN 으로 알아낸 IP/port 이지만 carrier NAT 의 mapping 이 ICE check 시점에 이미 다른 mapping 으로 교체. 이 경우 짧은 시간 안에 모든 게 바뀜.
+
+**왜 앱 재부팅도 안 통하나?** — Senior 측 stale state 가능성 가장 큼. Family 재시작해도 Senior 의 이전 peer slot 잔존 또는 캐시된 ICE state 가 새 Family 와의 negotiation 방해.
+
+### 2.7 production 영향 범위
+
+| 시나리오 | 발생 빈도 | 영향 |
+|---|---|---|
+| 집/회사 wifi 만 사용 | 가장 많음 (시니어 일반적) | 0 |
+| 외출 중 cellular 만 사용 | 중간 (이동 가족 사용자) | 0 (fresh 잘 됨) |
+| 통화 중 wifi → cellular 전환 (집 → 외출) | 적음 (특수 case) | **검은 화면 가능성** |
+| 통화 중 cellular → wifi 전환 (귀가) | 적음 | 일반적으로 OK (PC 자체 reconnect) |
+
+→ 핵심 production 시나리오는 wifi/cellular fresh 가 다수. handoff edge case 는 적지만 발생 시 사용자 혼란.
 
 ---
 
@@ -265,8 +284,8 @@ Twilio 등 매니지드 TURN 은 보통 **단기 credential** (TTL 24h) 발급. 
 이 doc 작성 시점 기준 (TURN 미적용):
 
 - **wifi-only 사용자**: 영향 없음 (대다수 시니어)
-- **cellular fresh start**: 통신사 NAT 따라 됨/안됨 — 운에 의존
-- **wifi → cellular handoff**: A17 등 일부 디바이스에서 검은 화면
+- **cellular fresh start (Android/iOS 모두)**: 정상 작동 — 사용자 검증 완료
+- **wifi → cellular handoff** (active session 중 wifi 끊고 cellular 로 전환): **검은 화면 가능** (A17 검증). 앱 재부팅도 즉시 회복 안 됨 — Senior 측 stale ICE state 의심.
 - **cellular → wifi handoff**: 일반적으로 OK (PC 자체 reconnect 빠름)
 
 이 제약은 [webrtc_integration_test.md](./webrtc_integration_test.md) 의 §6 "알려진 한계" 에 cross-link.
