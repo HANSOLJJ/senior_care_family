@@ -668,6 +668,7 @@ tail -f ~/iphone_family_sol2.log | grep -E "flutter|FSM|networkLost|familyDiscon
 - **iOS background suspension** — 30s 후 OS socket close 자동. plan A 마커가 동일 매커니즘으로 set.
 - **KEP MTK WiFi 자발적 drop** ([kep_wifi_suspend_presence.md](../../Senior/docs/kep_wifi_suspend_presence.md) §"연관 이슈 1") — plan A 양방향 마커 + 1회 ICE restart 로 떠받침
 - **Race A 거울** — Family endCall 직후 onDisconnect 발화 race. 좀비 통화 ✗ (영향 작음, 받아들이기)
+- **Cellular handoff + carrier NAT** — wifi → cellular 전환 시 일부 통신사/디바이스 (Galaxy A17 등) 의 symmetric NAT 로 P2P UDP connectivity check 실패 → 영상 검은 화면. STUN 만으론 해결 안 됨. **TURN relay 서버 필요**. 자세한 진단 + 대응: [cellular_ice_investigation.md](./cellular_ice_investigation.md).
 
 ---
 
