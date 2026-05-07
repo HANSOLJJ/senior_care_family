@@ -18,6 +18,7 @@
 | 2026-05-07 | iOS Sol2 검증 (S4 모니터링 + S4_5 영상통화) | Mac Mini SSH + flutter.log 실시간 매칭 |
 | 2026-05-07 | iOS S1_3 (Family wifi flap) 검증 + PC keepalive reconnect / ICE restart NetworkException race 발견 + fix (`webrtc_service.dart` PC=CONNECTED skip) | iOS Sol2 수동 wifi 토글 |
 | 2026-05-07 | 1:N S9~S12 검증 + capacity 정책 매트릭스 doc 정합화 (`call-scenarios.md §10-2/10-3/10-3-1`) | Android A + iOS B + Android C 3대 |
+| 2026-05-07 | S14 displace 검증 (R3) — A monitor → B call → A `otherCallStarted` | iOS Sol2 monitor + R3CR... call |
 
 ### Plan B 핵심
 
@@ -262,6 +263,21 @@
   - `call peer ≤ 1` (배타)
   - 동시 max peer = 4 (3 monitor + 1 call INCOMING, max 30s)
 
+### S14 — 1:N displace (Family A monitor → Family B call → A 강제 종료)
+
+- **흐름**: A=Sol2 (iOS) 모니터링 → B=R3CR700SEKP 영상통화 발신 → Senior ADB tap (640, 400) 자동수락
+- **trace**:
+  - `15:48:58` Sol2 모니터링 시작 → `15:48:59` connected
+  - `15:49:16` R3CR... 영상통화 탭
+  - `15:49:17` R3CR... connected (answer_received) → `senior_accepted_auto` → upgrading
+  - `15:49:18` R3CR... `renegotiate_done` → IN_CALL ✅
+  - `15:49:18` Sol2 `상대방이 통화 종료 endReason=otherCallStarted` → `hangup:endedByOtherCall` → terminated
+- **결론**: ✅ PASS — Senior `displaceOtherMonitors()` 정상 작동
+  - Family A (Sol2): displace 당함 (`endedByOtherCall` 다이얼로그 + pop)
+  - Family B (R3CR...): IN_CALL 진입 + 유지 (영향 없음)
+  - Senior: A peer ENDED + B peer IN_CALL (peer=1)
+- **S11 과 차이**: S11 = A는 call IN_CALL, 새 요청은 모두 `remoteBusy` 거절. S14 = A는 monitor, 새 call 들어오면 A 가 `otherCallStarted` 로 displace. 둘 다 "call 우선" 정책의 양면.
+
 ---
 
 ## Plan B v2 재검증 (2026-05-06)
@@ -400,6 +416,8 @@ faceDetectionSink = FaceDetectionVideoSink {
 | S10 (1:N long flap) | ✅ S9 long version | — | 검증 완료 |
 | S11 (call remoteBusy) | — | ✅ A IN_CALL / B remoteBusy | call+monitor 모두 거절 |
 | S12 (capacity 매트릭스) | ✅ peers≤3, call≤1 | ✅ 일시 peer=4 허용 | 정책 검증 + doc 갱신 |
+| S14 (displace) | ✅ A monitor displaced / B call IN_CALL | — | otherCallStarted 정상 발화 |
+| S15~S18 (race) | (미검증, optional) | (미검증) | 시간 날 때 |
 | **S13 (1→2 race)** | — | ✅ **8/8 PASS (Plan B 핵심)** | 영상통화 완료 |
 | iOS S4 (Sol2) | ✅ 8/8 PASS | ✅ 7/8 PASS (6s boundary timing) | 양 모드 완료 |
 | iOS S1_3 (Sol2 wifi flap) | — | ✅ PASS + race fix 검증 | 영상통화 완료 (PC reconnect race 발견 + 차단) |

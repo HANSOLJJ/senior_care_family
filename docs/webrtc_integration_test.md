@@ -455,6 +455,136 @@ WebRTC: 모니터링 → 통화 전환
 
 ---
 
+### S14 — 1:N displace (Family A monitor → Family B call → A 강제 종료)
+
+**사전 조건**: Family A 모니터링 active. Family B FamilyDetailScreen.
+
+**재현 (수동)**:
+
+1. Family A 모니터링 시작 → CONNECTED
+2. Family B 영상통화 발신
+3. Senior ADB tap (640, 400) 으로 자동수락
+4. Senior `displaceOtherMonitors()` → A peer `otherCallStarted` 거절
+
+**기대 동작**:
+
+- Family A: `endReason="otherCallStarted"` 수신 → `_mapEndReason` → `endedByOtherCall` → 다이얼로그 "모니터링이 종료되었습니다" → pop
+- Family B: 영상통화 IN_CALL 진입 + 유지 (renegotiate_done)
+- Senior: A peer ENDED + B peer 가 IN_CALL (peer=1)
+
+**PASS 판정**:
+
+- A `endedByOtherCall` 다이얼로그 + pop ✅
+- B IN_CALL 진입 + 영향 없음 ✅
+- Senior `displaceOtherMonitors()` 발화 ✅
+
+> S11 과 차이: S11 은 A=call, B 거절. S14 는 A=monitor, A 가 displace 당함. 자세한 정책 비교는 [call-scenarios.md §10-1, §10-2, §13-1, §13-2](./call-scenarios.md).
+
+---
+
+### S15 — A·B 동시 call 발신 race (한쪽만 성공)
+
+**사전 조건**: Family A + Family B 모두 FamilyDetailScreen.
+
+**재현 (수동, 동시 tap 권장)**:
+
+1. Family A + Family B 영상통화 버튼 거의 동시에 탭 (~50ms 이내)
+2. Senior 가 두 offer 거의 동시에 수신
+3. 첫 번째 offer 처리 → 두 번째 offer 도달 시 기존 call 감지 → `remoteBusy`
+
+**기대 동작**:
+
+- 한쪽만 IN_CALL 진입 (winner)
+- 다른 쪽 `endReason=remoteBusy` → 다이얼로그 → pop (loser)
+- 양쪽 모두 same Senior 에 대한 발신이라 winner 선정은 RTDB 도달 순서 의존
+
+**PASS 판정**:
+
+- 정확히 한쪽이 IN_CALL ✅
+- 다른 쪽 `remoteBusy` 거절 ✅
+- 좀비 통화 0건 ✅
+
+---
+
+### S16 — A·B 동시 wifi off (병렬 ICE restart race)
+
+**사전 조건**: Family A + Family B 모두 모니터링 active. 둘 다 Android (adb wifi off 자동화).
+
+**재현 (수동, 동시 wifi off 권장)**:
+
+1. A + B 모니터링 둘 다 CONNECTED
+2. `adb -s <A>` + `adb -s <B>` wifi off 거의 동시에 (~100ms 이내)
+3. ~5초 후 양쪽 wifi on
+
+**기대 동작**:
+
+- A + B 모두 PC disconnect → grace 4s → ICE restart 시도
+- Senior 측: 두 peer 모두 RESTARTING + STOP_DELAY 7s 예약
+- 두 ICE restart offer 거의 동시 수신 → 직렬 처리 (race 우려 지점)
+- 운 좋으면 둘 다 ice_restored, 운 나쁘면 한쪽 networkLost
+
+**PASS 판정**:
+
+- 좀비 peer 0건 (Senior 측 정리 확실) ✅
+- 다른 monitor 통화 영향 없음 ✅
+
+> Family B 가 iOS Sol2 인 경우 wifi off 자동화 불가 → A=Galaxy S21, B=Galaxy A17 조합 권장.
+
+---
+
+### S17 — A grace 중 B 신규 합류 race
+
+**사전 조건**: Family A 모니터링 active. Family B FamilyDetailScreen.
+
+**재현 (수동, timing 정밀 필요)**:
+
+1. A 모니터링 active
+2. A wifi off → PC disconnect → grace 4s 시작
+3. grace 4s 만료 전 (~2~3s 시점) Family B 모니터링 발신
+4. B connected. A 는 grace 만료 + ICE restart 시도
+
+**기대 동작**:
+
+- B 모니터링 정상 connected (Senior peer slot 손상 없음)
+- A 는 ICE restart 결과에 따라 복구 또는 networkLost
+- Senior 측 peer 카운터 정확 (A + B = 2)
+
+**PASS 판정**:
+
+- B connected 정상 ✅
+- A 복구 또는 정상 종결 (ice_restored 또는 networkLost) ✅
+- Senior peer slot 정확 ✅
+
+---
+
+### S18 — A·B 동시 발신 후 capacity boundary
+
+**사전 조건**: Senior peers=2 (A monitor + B monitor). Family C/D 동시 monitor 시도.
+
+**재현 (수동)**:
+
+1. A + B 모니터링 → peers=2
+2. C + D 거의 동시 모니터링 발신
+3. 한쪽이 3번째 (peers=3 진입), 다른 쪽이 4번째 (`capacityExceeded`)
+
+**기대 동작**:
+
+- 3번째 진입한 monitor connected
+- 4번째 monitor → `capacityExceeded` 거절
+- 정확히 peers ≤ 3 (race 보호)
+
+**PASS 판정**: 4번째 monitor 거절 + 1~3번째 monitor 영향 없음.
+
+---
+
+### Skip 시나리오 (비용 대비 가치 낮음)
+
+- **N3** — LTE 핸드오프: 디바이스/네트워크 한계. 자동화 어려움.
+- **N7** — Senior 응답 지연 (multi-peer answer): Senior 측 인위적 delay 도입 필요. 코드 review 로 갈음.
+- **N11** — upgrade fail + monitor 잔존 race: 인위적 fail 트리거 어려움. 코드 review 로 갈음.
+
+---
+
 ## 4. 자동화 스크립트
 
 ### 모드 분기 환경변수
