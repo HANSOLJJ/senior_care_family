@@ -47,7 +47,7 @@
 2026-04-24 displace 정책 문서화 + §5 1:N 시나리오 (R/N/NX) 14종 정리 완료. 사용자 보유 2번째 Family 기기 연결 후 실측.
 
 **준비**:
-- [ ] Family B (2번째 기기) ADB 식별자 확인 후 [ICE_restart_test.md §2 테스트 환경](ICE_restart_test.md#2-테스트-환경) 에 기재
+- [ ] Family B (2번째 기기) ADB 식별자 확인 후 [webrtc_integration_test.md §2 테스트 환경](webrtc_integration_test.md#2-테스트-환경) 에 기재
 
 **§4 회귀 (정책 핵심)**:
 - [ ] **R3** displace 절차 — Family A monitor → Family B call → A 다이얼로그/pop
@@ -71,7 +71,7 @@
 - [ ] **NX5** A·B 동시 call 발신 race → 한쪽만 성공, 다른 쪽 명시적 거절
 
 **기록**:
-- [ ] 결과를 `docs/ICE_restart_test_result.md` 의 R/N/NX 섹션으로 기록
+- [ ] 결과를 `docs/webrtc_integration_test_result.md` 의 §S 섹션으로 기록
 - [ ] 관찰된 UX 이슈 (있으면) 별도 TODO 등록
 
 ---

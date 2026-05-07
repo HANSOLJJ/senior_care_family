@@ -149,6 +149,6 @@ T+12     Senior FSM ENDED (자연 cleanup)
 
 - [RTDB_schema.md v4](RTDB_schema.md) — Family endReason writer 명시 (테이블 기반 재구성)
 - [call-scenarios.md §10](call-scenarios.md) — endReason 매트릭스 (RTDB 도달 컬럼)
-- [ICE_restart_test_result.md §R2](ICE_restart_test_result.md) — 검증 시퀀스
+- [webrtc_integration_test_result.md §S8](webrtc_integration_test_result.md) — R2 race 검증 시퀀스 (S8 으로 통합)
 - [Senior `kep_wifi_suspend_presence.md` §"연관 이슈 1"](e:\App\Senior\docs\kep_wifi_suspend_presence.md) — S16 본 의도
 - Commit `955e0d7` — S16 옵션 2 배포 (R2 race 의 직전 단계)

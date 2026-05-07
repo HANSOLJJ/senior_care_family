@@ -1,10 +1,14 @@
-# ICE Restart 테스트 시트
+# WebRTC 통합 테스트 시트
 
-> **정책 (2026-04-30 plan A + 1회 시도 단순화 후)**
-> - Family `setCallCleanupOnDisconnect` = 마커 정책 (`status="ended"`, `endReason="familyDisconnect"`)
-> - ICE restart **1회 시도**, 실패 시 즉시 `networkLost` 종결 (재시도 없음)
-> - 종결 시 SnackBar **"연결 불안정으로 통화가 종료되었습니다"** 2초 안내 + 즉시 화면 pop
-> - 재발신은 사용자가 family detail 화면에서 모니터링/통화 버튼 직접 탭으로 처리
+> 시나리오 범위: ICE restart (네트워크 복구) + 1:N peer 정책 (capacity, displace) + race (Plan B 필드 분리, 동시 발신 등).
+>
+> **정책 (Plan B 필드 분리 모델, 2026-04-30 +)**
+>
+> - `hasFlapMarker` 별도 필드 (status 와 분리). 자기/상대 마커 구분은 PC `connectionState` 기반.
+> - ICE restart **1회 시도**, 실패 시 즉시 `networkLost` 종결 (재시도 없음).
+> - PC keepalive 자체 reconnect 와 ICE restart NetworkException race 시 PC=CONNECTED 면 networkLost skip.
+> - 종결 시 SnackBar **"연결 불안정으로 통화가 종료되었습니다"** 2초 안내 + 즉시 화면 pop.
+> - 재발신은 사용자가 family detail 에서 모니터링/통화 버튼 탭.
 
 ---
 
@@ -507,7 +511,7 @@ tail -f ~/iphone_family_sol2.log | grep -E "flutter|FSM|networkLost|familyDiscon
 
 ## 7. 결과 누적
 
-[ICE_restart_test_result.md](./ICE_restart_test_result.md) — 시나리오별 PASS/FAIL + 측정값 + iOS/Android 분리.
+[webrtc_integration_test_result.md](./webrtc_integration_test_result.md) — 시나리오별 PASS/FAIL + 측정값 + iOS/Android 분리.
 
 ---
 

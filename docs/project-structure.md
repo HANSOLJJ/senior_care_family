@@ -243,7 +243,7 @@ RTDB calls/{cid}/iceRestartOffer 에 SDP 기록 (signaling.sendIceRestartOffer)
 - CONNECTED **5초 안정 유지** 시 attempts/flapWindow 리셋
 - `_iceRestartInProgress` 가드로 중복 트리거 방지
 
-테스트 시트: [ICE_restart_test.md](ICE_restart_test.md) · 시퀀스 다이어그램: [call-scenarios.md §6-7](call-scenarios.md)
+테스트 시트: [webrtc_integration_test.md](webrtc_integration_test.md) · 시퀀스 다이어그램: [call-scenarios.md §6-7](call-scenarios.md)
 
 ### 좀비 peer 방지 (cleanupCall 10초 지연)
 
@@ -502,8 +502,8 @@ firebase deploy --only functions
 
 - [RTDB_schema.md](RTDB_schema.md) — RTDB 전체 스키마
 - [call-scenarios.md](call-scenarios.md) — 통화/모니터링 FSM · 시퀀스 다이어그램 · 1:N × 1:1 정책 흐름
-- [ICE_restart_test.md](ICE_restart_test.md) — ICE Restart 테스트 시트 (S1~S17 + R1~R8 회귀)
-- [ICE_restart_test_result.md](ICE_restart_test_result.md) — ICE Restart 테스트 실측 결과
+- [webrtc_integration_test.md](webrtc_integration_test.md) — WebRTC 통합 테스트 시트 (ICE restart + 1:N 정책 + race)
+- [webrtc_integration_test_result.md](webrtc_integration_test_result.md) — 테스트 실측 결과 누적
 - [datachannel-photo-transfer.md](datachannel-photo-transfer.md) — 미디어 전송 설계
 - [smart-frame-plan.md](smart-frame-plan.md) — 전체 구현 계획 (Phase 1~7)
 - [to_do.md](to_do.md) — 현재 TODO

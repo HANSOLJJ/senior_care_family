@@ -1,6 +1,6 @@
-# ICE Restart 테스트 결과 누적
+# WebRTC 통합 테스트 결과 누적
 
-> 본 문서는 [ICE_restart_test.md](./ICE_restart_test.md) 시나리오의 검증 결과 누적.
+> 본 문서는 [webrtc_integration_test.md](./webrtc_integration_test.md) 시나리오 (ICE restart + 1:N 정책 + race) 의 검증 결과 누적.
 >
 > **Plan B (필드 분리 모델, 2026-04-30)** 시점부터 결과 기록. 이전 Plan A 시절 결과는
 > [ICE_restart_test_result_backup.md](./ICE_restart_test_result_backup.md) 참조.

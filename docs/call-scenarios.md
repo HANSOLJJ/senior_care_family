@@ -1,6 +1,6 @@
 # 영상통화 / 모니터링 시나리오 다이어그램
 
-Family ↔ Senior WebRTC 통화 · 모니터링 · ICE restart 전 시나리오.
+Family ↔ Senior WebRTC 통화 · 모니터링 · ICE restart 전 시나리오. **Plan B (필드 분리 hasFlapMarker) + ICE restart 1회 시도 + Family UX 단순화** 정착 후 기준.
 
 > 시그널링 채널: Firebase RTDB `/calls/{callId}/`
 > 구현 경로: [webrtc_service.dart](../lib/services/call/webrtc_service.dart), [signaling_service.dart](../lib/services/call/signaling_service.dart)
@@ -15,18 +15,24 @@ stateDiagram-v2
     [*] --> idle
     idle --> connecting: startCall / startMonitoring
     connecting --> connected: answer 수신 (Phase1, 5s)
-    connecting --> terminating: Phase1 timeout
+    connecting --> terminating: Phase1 timeout (unreachable)
     connected --> upgrading: upgradeToCall (monitor→call)
     upgrading --> connected: renegotiateAnswer 수신
     upgrading --> connected: 실패시 복귀
-    connected --> reconnecting: DISCONNECTED(4s) / FAILED
-    reconnecting --> connected: iceRestartAnswer + 5s 안정
-    reconnecting --> terminating: iceFailed
+    connected --> reconnecting: DISCONNECTED 감지 (즉시 — 사용자 인지용)
+    reconnecting --> connected: iceRestartAnswer + CONNECTED 복귀
+    reconnecting --> terminating: ICE restart 1회 시도 실패 (iceFailed)
     connected --> terminating: hangUp / remote ended
     upgrading --> terminating: hangUp
     terminating --> terminated: cleanup 완료
     terminated --> [*]
 ```
+
+FSM 핵심:
+
+- `connected → reconnecting`: DISCONNECTED 감지 즉시 (사용자 즉시 인지용 오버레이)
+- `reconnecting → connected`: ICE restart answer 수신 또는 PC 자체 reconnect (5s 안정 대기 없음)
+- `reconnecting → terminating (iceFailed)`: ICE restart 1회 시도 실패 시 (재시도 없음)
 
 ---
 
@@ -47,7 +53,7 @@ sequenceDiagram
     F->>F: getUserMedia + PC 생성 (SendRecv)
     F->>F: createOffer + setLocalDescription
     F->>R: offer, status=ringing, callType=call, seniorAccepted=false
-    F->>R: onDisconnect(cleanupCall) 등록
+    F->>R: onDisconnect 등록 (hasFlapMarker=true, Plan B)
     R->>S: onChildAdded
     S->>S: answerCall + setRemoteDescription
     S->>R: answer, status=connected
@@ -84,7 +90,7 @@ sequenceDiagram
 
     U->>F: 종료 버튼
     F->>F: hangUp (reason=normal)
-    F->>R: status=ended, endReason=normal
+    F->>R: status=ended, endReason=remoteEnded
     F->>F: 10s 후 노드 delete
     F->>F: FSM terminated → pop
 ```
@@ -155,8 +161,6 @@ sequenceDiagram
 
 ## 6. ICE Restart — 정상 복구
 
-네트워크 전환(Wi-Fi↔LTE), NAT rebinding, 일시 단절 시 자동 복구.
-
 ```mermaid
 %%{init: {'sequence': {'actorMargin':90, 'messageMargin':50, 'width':200}}}%%
 sequenceDiagram
@@ -168,11 +172,11 @@ sequenceDiagram
 
     Note over PC,F: 정상 상태 (connected)
     PC->>F: connectionState = DISCONNECTED
+    F->>F: FSM connected → reconnecting (즉시)
+    Note over F: 사용자 즉시 인지 — "연결 상태가 좋지 않습니다" 오버레이 표시
     F->>F: grace 타이머 시작 (4s)
-    Note over F: 4s 내 CONNECTED 복귀 시<br/>restart 불필요 — 타이머 취소
-    F->>F: grace 만료 → _triggerIceRestart
-    F->>F: 한도 체크 (flap<60s, attempts<5)
-    F->>F: FSM connected → reconnecting
+    Note over F: 4s 내 CONNECTED 복귀 시<br/>restart 불필요 — 타이머 취소, 오버레이 사라짐
+    F->>F: grace 만료 → _triggerIceRestart (1회 시도)
     F->>PC: restartIce + createOffer
     F->>R: iceRestartOffer (write 3s timeout)
     R->>S: onValue
@@ -182,17 +186,22 @@ sequenceDiagram
     F->>PC: setRemoteDescription
     Note over F,S: 새 ICE candidate 재교환
     PC->>F: connectionState = CONNECTED
-    F->>F: FSM reconnecting → connected
-    F->>F: 5s 안정 후 attempts=0 리셋
+    F->>F: FSM reconnecting → connected (즉시 — 5s 안정 대기 폐기)
+    F->>F: 오버레이 사라짐
 ```
 
-**FAILED 상태는 grace 없이 즉시 restart 트리거**.
+- `_iceRestartAttempts`, `_flapWindowStart`, `_stableTimer` 모두 폐기 (1회 시도 정책)
+- FSM `connected → reconnecting` 즉시 전이 → 사용자 즉시 인지
+
+**FAILED 상태**: grace 없이 즉시 1회 ICE restart 트리거.
+
+**PC keepalive race fix**: ICE restart offer/answer NetworkException 또는 10s timeout 시 PC=CONNECTED 면 networkLost skip — PC 자체 reconnect 가 ICE restart 보다 빠른 케이스에서 통화 유지 ([webrtc_service.dart `_triggerIceRestart`](../lib/services/call/webrtc_service.dart)).
 
 ---
 
-## 7. ICE Restart — 한도 초과 / 실패
+## 7. ICE Restart — 1회 시도 실패
 
-answer 미수신 자동 재시도, 최종 실패 시 iceFailed 종료.
+answer 미수신 또는 createOffer/RTDB write 실패 시 즉시 종결. **재시도 없음**.
 
 ```mermaid
 %%{init: {'sequence': {'actorMargin':90, 'messageMargin':50, 'width':200}}}%%
@@ -202,27 +211,31 @@ sequenceDiagram
     participant F as Family
     participant R as RTDB
 
-    Note over PC,F: reconnecting 상태, restart 시도 중
+    Note over PC,F: reconnecting 상태, 1회 시도 중
     F->>R: iceRestartOffer 전송
     Note over F: answer 대기 (10s)
 
     alt 10s 내 answer 미수신
-        F->>F: _iceRestartInProgress = false
-        Note over F: 여전히 DISCONNECTED/FAILED면<br/>_triggerIceRestart 재귀 호출
-    else 한도 초과 (attempts≥5 or flap>60s)
         F->>F: hangUp (reason=iceFailed)
-        F->>R: status=ended, endReason=iceFailed
+        F->>R: status=ended, endReason=remoteEnded (R2 fix — Family RTDB 단일 출력)
+        F->>F: FSM terminating → terminated
+        F->>F: SnackBar "연결 불안정으로 통화가 종료되었습니다 [다시 걸기]"
+    else createOffer/RTDB write 실패
+        F->>F: hangUp (reason=iceFailed) 즉시
         F->>F: FSM terminating → terminated
     end
 ```
 
-구현: [webrtc_service.dart:448-513](../lib/services/call/webrtc_service.dart#L448-L513)
+- `_iceRestartInProgress` 가드만 남기고 재시도 / 한도 / flap window 모두 폐기
+- 종결 시 SnackBar 2s + 즉시 pop (§14 참조)
+
+구현: [webrtc_service.dart `_triggerIceRestart`](../lib/services/call/webrtc_service.dart)
 
 ---
 
 ## 8. 비정상 종료 — 앱 크래시 / 네트워크 끊김
 
-Firebase onDisconnect 핸들러가 서버 측에서 자동 cleanup.
+Plan B: Firebase server-side onDisconnect 가 `hasFlapMarker=true` 자동 set (status 안 건드림). 상세 §10-4.
 
 ```mermaid
 %%{init: {'sequence': {'actorMargin':90, 'messageMargin':50, 'width':200}}}%%
@@ -232,11 +245,11 @@ sequenceDiagram
     participant R as RTDB (Firebase)
     participant S as Senior App
 
-    F->>R: createCall + onDisconnect(cleanupCall) 등록
+    F->>R: createCall + onDisconnect(hasFlapMarker=true) 등록 (Plan B)
     Note over F: 앱 크래시 / 강제 종료 / 네트워크 단절
-    R->>R: 연결 끊김 감지 → /calls/{callId} 자동 삭제
-    R->>S: onValue(null) / onChildRemoved
-    S->>S: 로컬 cleanup + UI pop
+    R->>R: 연결 끊김 감지 → /calls/{callId}/hasFlapMarker=true set
+    R->>S: listenForFlapMarker 알림
+    S->>S: PC state 기반 자기/상대 마커 구분 (§10-4)
 ```
 
 ---
@@ -270,19 +283,20 @@ sequenceDiagram
 
 ## 10. 종료 사유(endReason) 매트릭스
 
-> ⚠️ **TerminateReason ≠ RTDB endReason**: 본 표의 행 중 일부는 Family `TerminateReason` (Dart enum, 메모리 안에서만) 이고, 일부는 RTDB `/calls/{cid}/endReason` string 값. "RTDB 도달" 컬럼으로 구분. Family 가 RTDB 에 실제로 쓰는 endReason 은 **`"remoteEnded"` 한 가지만** (R2 fix 이후). `unreachable`/`noAcceptance`/`iceFailed` 는 Family 내부 enum 으로만 존재 (UI/로깅용), RTDB 안 닿음.
+> ⚠️ **TerminateReason ≠ RTDB endReason**: 본 표의 행 중 일부는 Family `TerminateReason` (Dart enum, 메모리 안에서만) 이고, 일부는 RTDB `/calls/{cid}/endReason` string 값. "RTDB 도달" 컬럼으로 구분. Family 가 RTDB 에 실제로 쓰는 endReason 은 **`"remoteEnded"` 한 가지만** (R2 fix 이후).
 
 | endReason | RTDB 도달 | RTDB Writer | 트리거 | FSM 경유 | UI 메시지 |
 | --------- | :---: | --- | ------ | -------- | --------- |
 | `normal` | ✅ | Senior `markEnded`/`hangUp` | Senior 사용자 명시적 hangUp | terminating | 통화 종료 |
 | `unreachable` | ❌ | (Family 내부 enum 만) | Phase 1 timeout (5s) | connecting→terminating | 응답 없음 |
 | `noAcceptance` | ❌ | (Family 내부 enum 만) | Phase 2 timeout (20s) | connected→terminating | 수신자가 받지 않음 |
-| `iceFailed` | ❌ | (Family 내부 enum 만) | flap>60s or attempts≥5 | reconnecting→terminating | 연결 실패 |
-| `remoteEnded` | ✅ | **Family `endCall`** (R2 fix) — 모든 Family 측 종결의 단일 RTDB 값. Senior listener 가 받으면 `_mapEndReason` 으로 `TerminateReason.remoteEnded` 매핑 | Family 측이 종결 (사용자 hangUp / iceFailed / unreachable / 등 어떤 내부 사유든) | connected→terminating | 상대방이 종료 |
+| **`iceFailed`** | ❌ | (Family 내부 enum 만) | **ICE restart 1회 시도 실패** (answer 10s 미수신 또는 createOffer/RTDB write 실패) | reconnecting→terminating | **"연결 불안정으로 통화가 종료되었습니다" SnackBar + "다시 걸기"** |
+| `remoteEnded` | ✅ | Family `endCall` (R2 fix) — 모든 Family 측 종결의 단일 RTDB 값 | Family 측이 종결 (사용자 hangUp / iceFailed / 등 어떤 내부 사유든) | connected→terminating | 상대방이 종료 |
 | `remoteBusy` | ✅ | Senior `rejectCall` | Senior 다른 통화 중 | connecting→terminating | 통화 중 |
 | `capacityExceeded` | ✅ | Senior `rejectCall` | Senior MAX_PEERS(3) 초과 | connecting→terminating | 모니터링 한도 초과 |
 | `otherCallStarted` | ✅ | Senior `rejectCall` | 모니터링 중 Senior 가 call 수락 → displace | connected→terminating | 모니터링이 종료되었습니다 |
-| `seniorDisconnect` | ✅ | Server-side onDisconnect (S16 fix) — Senior wifi 단절 시 Firebase 서버가 자동 기록 | Senior wifi 끊김 (자발적 flap 떠받치기 마커) | grace 15s 대기 → 복구 시 무효화 / grace 만료 시 `remoteEnded` 로 종결 | (UI 변경 없음 — grace 동안 재연결 표시 유지) |
+| ~~`seniorDisconnect`~~ | ❌ (Plan B 폐기) | Server-side onDisconnect (S16 fix, Plan A 까지) | Plan B 에서 `hasFlapMarker` 별도 필드로 대체. status 안 건드림. | — | — |
+| `hasFlapMarker` (필드, Plan B) | ✅ | Server-side onDisconnect (양측) | Family/Senior wifi 끊김 시 자동 set. status 무관. | 별도 listener 가 grace 분기 — PC=CONNECTED 면 자기 마커 clear, ≠CONNECTED 면 상대 wifi flap → grace 진입 | (UI 변경 없음) |
 | `userHangup`, `networkOffline`, `upgradeFailed`, `endedByOtherCall` | ❌ | (Family 내부 enum 만) | 다양 — Family `_mapEndReason` 또는 자체 hangUp reason | 다양 | 다양 |
 
 ### 왜 Family RTDB 는 "remoteEnded" 한 가지 — TerminateReason vs RTDB endReason
@@ -313,20 +327,20 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 
 ### 10-2. `remoteBusy` 상세 (call 진행 중 신규 peer 전체 차단 정책)
 
-**발생 조건**: Senior 가 이미 `callType="call"` 로 통화 중 → 다른 Family 가 **call 또는 monitor 발신**.
+**발생 조건**: Senior 가 이미 `callType="call"` 로 통화 중 (INCOMING/IN_CALL) → 다른 Family 가 **call 또는 monitor 발신**.
 
 **정책**: 영상통화 (call) 진행 중에는 **신규 call 뿐 아니라 신규 monitor 도 모두 거절** ([MonitoringSession.kt:436-448](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L436-L448)).
 
-- 이유: call 의 양방향 audio/video 라우팅과 새 monitor peer 의 broadcast fan-out 이 충돌. 깔끔한 격리 위해 call 동안 모든 신규 peer 차단.
+- 이유: call 의 양방향 audio/video 라우팅과 새 monitor peer 의 broadcast fan-out 충돌. 깔끔한 격리 위해 call 동안 모든 신규 peer 차단.
 - 호환: 영상통화 종료 후 자동으로 신규 monitor/call 다시 받음.
 
 **Senior 동작**: 새 call/monitor offer 도달 시 기존 call 존재 감지 → `rejectCall(..., REMOTE_BUSY)` → RTDB `endReason="remoteBusy"` write. 기존 call peer 는 영향 없음.
 
-**Family 동작** (새 발신자): `_mapEndReason("remoteBusy") → TerminateReason.remoteBusy` → 다이얼로그 "{Senior 이름}이(가) 통화 중입니다 / 다른 가족이 통화 중입니다. 잠시 후 다시 시도해주세요." → pop.
+**Family 동작** (새 발신자): `_mapEndReason("remoteBusy") → TerminateReason.remoteBusy` → 다이얼로그 "{Senior 이름}이(가) 통화 중입니다" → pop.
 
-**핵심**: 차단 시점은 **INCOMING 단계부터** (수락 전부터). 즉 첫 번째 call 발신자가 INCOMING 화면 표시되는 순간부터 모든 신규 요청 (call/monitor) 거절. 결과적으로 **call peer 는 동시에 최대 1개**.
+**핵심**: 차단 시점은 **INCOMING 단계부터** (수락 전부터). 첫 번째 call 발신자가 INCOMING 표시되는 순간부터 모든 신규 요청 거절. 결과적으로 **call peer 는 동시에 최대 1개**.
 
-### 10-3. `capacityExceeded` 상세 (MAX_PEERS=3)
+### 10-3. `capacityExceeded` 상세 (MAX_PEERS=3, monitor 한정)
 
 **발생 조건**: Senior 가 이미 **monitor peer** 3개 운영 중 → 4번째 Family 가 monitor 발신.
 
@@ -336,7 +350,7 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 
 **주의**: MAX_PEERS=3 은 **monitor 에만 적용**. call 은 별개 제약 ([MonitoringSession.kt:452-457](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L452-L457)).
 
-- 즉 monitor 3개 active 상태에서 call 1개 발신 → 허용 → **일시 peer=4** (INCOMING 단계, 최대 30s)
+- monitor 3개 active 상태에서 call 1개 발신 → 허용 → **일시 peer=4** (INCOMING 단계, 최대 30s)
 - INCOMING 도중 다른 신규 요청 (5번째) → §10-2 remoteBusy 거절
 - 수락 시 `displaceOtherMonitors()` → monitor 3개 모두 `otherCallStarted` 거절 → peer=1 (call only)
 - 수락 안 됨 (30s 타임아웃) → status="ended" → peer=3 (monitor 그대로)
@@ -351,32 +365,46 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 
 **불변량**: `call peer ≤ 1` (항상). `monitor peer ≤ 3` (항상). 동시 최대 peer = 4 (3 monitor + 1 call INCOMING, max 30s).
 
-### 10-4. `seniorDisconnect` 상세 (KEP WiFi flap 떠받치기, S16 fix)
+### 10-4. `hasFlapMarker` 상세 (Plan B — wifi flap 신호 별도 필드)
 
-**발생 조건**: Senior wifi 자발적 drop (KEP M10VSA2 MTK WiFi `reason=0 locally_generated=1`) 또는 일반 wifi 단절. Senior 측 server-side `onDisconnect` 핸들러가 자동 발화.
+**Plan B 핵심 변경**: Plan A 의 `endReason="familyDisconnect"`/`"seniorDisconnect"` 마커 폐기 →
+`hasFlapMarker=true` 별도 필드 도입. `status` 는 정상 종결만 변경 → 모든 listener 가
+endReason 분기 없이 처리 가능 (race 폭발 해결).
 
-**Senior server-side 동작** ([SignalingClient.kt:registerDisconnectCleanup](../../Senior/app/src/main/java/com/seniorcare/senior/webrtc/SignalingClient.kt)):
+**발생 조건**:
+- Family 또는 Senior wifi 끊김 → Firebase server-side onDisconnect 가 `hasFlapMarker=true` 자동 set.
 
-- `callRef.onDisconnect().updateChildren({status:"ended", endReason:"seniorDisconnect"})` — 노드 삭제 대신 임시 마커
-- Firebase 서버가 Senior socket 끊김 감지 시 자동 발화
+**Family 동작** ([webrtc_service.dart](../lib/services/call/webrtc_service.dart)):
 
-**Senior 자기 측 동작** (wifi 복구 후, [MonitoringSession.kt:1092](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt#L1092)):
+신규 `_flapMarkerSub` 리스너가 hasFlapMarker 변경 감지 → PC connectionState 기반 자기/상대 마커 구분.
 
-자기 onDisconnect 결과 (status="ended" + endReason="seniorDisconnect") 를 받으면:
+- **PC=CONNECTED**: 자기 마커 추정 (wifi 복귀 후 자기가 set 한 마커가 RTDB 에서 도달).
+  → `clearFlapMarker(callId)` + `setCallCleanupOnDisconnect(callId)` (재등록).
+- **PC≠CONNECTED**: 상대 (Senior) wifi flap 추정.
+  → 별도 timer 안 둠 — PC keepalive 가 곧 끊김 인지 → `_onPeerConnectionStateChanged` →
+    grace 4s + ICE restart 1회 시도 자체 흐름 위임.
 
-1. `cancelDisconnectCleanup()` — `onDisconnect` 핸들러 취소
-2. `registerDisconnectCleanup()` — 다음 단절 대비 재등록
-3. `restoreActiveStatus()` — `status="answered"` + `endReason=null` 로 복원
+**Senior 동작** ([MonitoringSession.kt](../../Senior/app/src/main/java/com/seniorcare/senior/call/MonitoringSession.kt)):
 
-**Family 동작** ([webrtc_service.dart:_callEndSub](../lib/services/call/webrtc_service.dart)):
+신규 `listenForFlapMarker` 리스너가 hasFlapMarker 변경 감지 → 동일 PC state 분기.
 
-`endReason="seniorDisconnect"` 수신 시 즉시 hangUp 안 함 → `_seniorDisconnectGraceTimer` 15초 시작.
+- **PC=CONNECTED**: 자기 마커 → clear + onDisconnect 재등록 (`registerDisconnectCleanup` 재호출).
+- **PC≠CONNECTED**: 상대 (Family) wifi flap → `scheduleStopPeer(callId, STOP_DELAY_MS=7s)`. ICE restart offer 도착 시 cancel.
 
-- grace 만료 전 PC CONNECTED 복귀 시: 통화 유지 (timer 자동 cancel)
-- grace 만료 시 PC CONNECTED 면: 통화 유지
-- grace 만료 시 PC 미복구: `hangUp(remoteEnded)` 종결
+**복구 가능 한계**:
+- Family wifi off **1~6초** [모니터링/영상통화]: ICE restart 1회 시도로 복구 (떠받침)
+- Family wifi off **15초+**: Family ICE restart 시점 wifi 아직 off → networkLost 정상 종결
+- Senior wifi off **1~4초**: ICE restart 1회 시도로 복구 (떠받침)
+- Senior wifi off **5초+**: Senior PC keepalive timeout + STOP_DELAY 7s 만료 → networkLost 정상 종결
 
-**복구 가능 한계**: Senior wifi off 1~4초 → ICE restart 자연 진입으로 복구. 5~12초 → Senior PC keepalive timeout (5s) + STOP_DELAY (7s) 가 ICE restart 보다 먼저 발화 → grace 안에 복구 못하고 `remoteEnded` 종결. 12초 초과 → wifi 복구 전 Senior 자체 종결. 검증 결과는 [ICE_restart_test_result.md S16](./ICE_restart_test_result.md#s16--senior-측-wi-fi-단절) 참조.
+**Plan A 대비 race 해결**:
+- 영상통화 1→2 전이 시 race (S13) — Plan A 에서는 status="ended" + endReason="familyDisconnect" 마커가
+  upgradeToCall 의 RTDB write 를 막아서 noAcceptance 종결 발생. Plan B 는 status="active" 그대로 유지 →
+  upgrade 정상 진행 → race 사라짐.
+- 사용자 hangup 시 Senior 가 늦게 종결되던 race — Plan A 에서는 active 복원 비동기 vs hangup 동시 race.
+  Plan B 는 status 자체 안 건드리니 복원 불필요 → race 사라짐.
+
+검증 결과는 [webrtc_integration_test_result.md](./webrtc_integration_test_result.md) 참조.
 
 ---
 
@@ -398,7 +426,7 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 ├── upgradeRequest          call (monitor→call 전환)
 ├── renegotiateOffer        SDP (upgrade)
 ├── renegotiateAnswer       SDP (upgrade 응답)
-├── iceRestartOffer         SDP (ICE restart)
+├── iceRestartOffer         SDP (ICE restart, 1회 시도)
 ├── iceRestartAnswer        SDP (ICE restart 응답)
 ├── callerCandidates/{push} candidate, sdpMid, sdpMLineIndex
 └── calleeCandidates/{push} candidate, sdpMid, sdpMLineIndex
@@ -414,13 +442,14 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 | ---- | -- | ---- |
 | Phase 1 (answer 대기) | 5s | `startCall` / `startMonitoring` |
 | Phase 2 (seniorAccepted 대기) | 20s | `_listenForSeniorAccepted` |
-| DISCONNECTED grace | 4s | `_startDisconnectedGrace` |
+| DISCONNECTED grace | 4s | `_disconnectTimer` (`_graceMs`) |
 | ICE restart answer 대기 | 10s | `_iceRestartAnswerTimeoutMs` |
-| ICE restart 한도 | 5회 / 60s window | `_maxIceRestartAttempts` / `_maxFlapWindowMs` |
-| 종료 후 노드 정리 | 10s | `hangUp` (fire-and-forget) |
-| RTDB write timeout | 3s | `writeOrTimeout` (NetworkGuard) |
+| 종결 SnackBar duration | 2s | `monitoring_screen.dart` (networkLost 케이스) |
+| 종료 후 노드 정리 | 10s | `cleanupCall` (fire-and-forget) |
+| RTDB write timeout | 2~3s | `writeOrTimeout` (NetworkGuard) |
 | Senior monitor peer 상한 | 3 (`MAX_PEERS`) | Senior `MonitoringSession` |
-| Senior STOP_DELAY (RESTARTING 중) | 15s | Senior `MonitoringPeer` |
+| Senior STOP_DELAY (RESTARTING 중) | 7s | Senior `MonitoringSession.STOP_DELAY_MS` |
+| INCOMING 30s 타임아웃 (call 미수락) | 30s | Senior `CallActivity.INCOMING_TIMEOUT_MS` |
 
 ---
 
@@ -430,8 +459,8 @@ Family `TerminateReason` enum 10종은 Family UI/로깅 분기용 (메모리 안
 
 - Senior 1대에 여러 Family 가 **monitor 동시 가능** (최대 `MAX_PEERS=3`)
 - **Call 은 배타적** (1개만 허용). call 시작 시 기존 monitor 들은 `endReason="otherCallStarted"` 로 **자동 displace**
-- Call 중 다른 Family 의 call 시도 → `endReason="remoteBusy"` 로 거절
-- 4번째 Family 의 monitor 시도 → `endReason="capacityExceeded"` 로 거절
+- Call 진행 중 (INCOMING/IN_CALL) 다른 Family 의 call/monitor 시도 → `endReason="remoteBusy"` 로 거절
+- 4번째 Family 의 monitor 시도 → `endReason="capacityExceeded"` 로 거절 (call 발신은 별개 — §10-3 주의)
 
 ### 13-1. displace 시퀀스 (Family A monitor 중 → Family B call)
 
@@ -470,7 +499,7 @@ sequenceDiagram
     Note over FB,S: Family B 양방향 통화 유지
 ```
 
-### 13-2. remoteBusy 시퀀스 (Family A call 중 → Family B call 시도)
+### 13-2. remoteBusy 시퀀스 (Family A call 중 → Family B 시도)
 
 ```mermaid
 %%{init: {'sequence': {'actorMargin':80, 'messageMargin':40, 'width':170}}}%%
@@ -482,11 +511,11 @@ sequenceDiagram
     participant FB as Family B
     actor UB as Family B User
 
-    Note over FA,S: Family A 영상통화 CONNECTED
-    UB->>FB: 영상통화 버튼
-    FB->>R: createCall (cidB, callType=call)
+    Note over FA,S: Family A 영상통화 (INCOMING/IN_CALL)
+    UB->>FB: 영상통화 또는 모니터링 버튼
+    FB->>R: createCall (cidB, callType=call/monitor)
     R->>S: onChildAdded (cidB)
-    S->>S: 기존 call peer 존재 감지
+    S->>S: 기존 call peer 존재 감지 (callType 무관 거절)
     S->>R: cidB: status=ended, endReason=remoteBusy
     R->>FB: listenForCallEnd
     FB->>FB: _mapEndReason → remoteBusy
@@ -506,6 +535,8 @@ Senior: peers 카운터 3 ≥ MAX_PEERS → rejectCall(CAPACITY_EXCEEDED)
 Family D: endReason="capacityExceeded" 수신 → "모니터링 한도 초과" 다이얼로그 → pop
 ```
 
+→ 단, Family D 가 **call** 발신이면 허용 (일시 peer=4, INCOMING 단계 max 30s). 자세한 내용 §10-3-1 매트릭스.
+
 ### 13-4. Family 측 UX 참조
 
 | 상황 | Family UX | 코드 경로 |
@@ -517,4 +548,95 @@ Family D: endReason="capacityExceeded" 수신 → "모니터링 한도 초과" �
 
 ### 13-5. 관련 회귀 테스트
 
-실기기 실측 시나리오는 [ICE_restart_test.md §5 "1:N 환경 회귀 테스트" (R5~R8)](ICE_restart_test.md) 참조.
+실기기 실측 시나리오는 [webrtc_integration_test.md §S9~S12 "1:N 정책"](webrtc_integration_test.md) 참조.
+
+---
+
+## 14. Family UX
+
+### 14-1. DISCONNECTED 감지 시 즉시 인지 오버레이
+
+DISCONNECTED 감지 즉시 FSM `reconnecting` 전이 → 오버레이 즉시 표시 (사용자가 즉시 "연결 상태가 좋지 않습니다" 인지).
+
+```mermaid
+%%{init: {'sequence': {'actorMargin':90, 'messageMargin':45, 'width':180}}}%%
+sequenceDiagram
+    autonumber
+    participant PC as RTCPeerConnection
+    participant F as Family (WebRtcService)
+    participant UI as MonitoringScreen / CallScreen
+    actor U as Family User
+
+    PC->>F: connectionState = DISCONNECTED
+    F->>F: FSM connected → reconnecting (즉시)
+    F->>UI: phase 변화 알림
+    UI->>U: "연결 상태가 좋지 않습니다" 오버레이 (즉시)
+    F->>F: grace 4s 시작
+    
+    alt 4s 안 CONNECTED 복귀
+        PC->>F: connectionState = CONNECTED
+        F->>F: FSM reconnecting → connected
+        F->>UI: phase 변화 알림
+        UI->>U: 오버레이 사라짐 (사용자는 "어 잠깐 끊겼다 살아났네" 인지)
+    else 4s 만료
+        F->>F: ICE restart 1회 시도 (§6, §7)
+        Note over F,UI: 오버레이 유지 (~10s 추가)
+    end
+```
+
+### 14-2. 종결 시 SnackBar + 즉시 pop
+
+`onCallEnded` 콜백 → SnackBar 2s 표시 + 즉시 `Navigator.pop` (사용자 입력 불필요). 14-3 매핑표 참조.
+
+```mermaid
+%%{init: {'sequence': {'actorMargin':90, 'messageMargin':45, 'width':180}}}%%
+sequenceDiagram
+    autonumber
+    participant F as Family (WebRtcService)
+    participant UI as MonitoringScreen / CallScreen
+    actor U as Family User
+
+    F->>F: hangUp(iceFailed) — ICE restart 1회 시도 실패
+    F->>UI: onCallEnded 콜백
+    UI->>UI: terminateReason = iceFailed
+    UI->>U: SnackBar "연결 불안정으로 통화가 종료되었습니다 [다시 걸기]" (1.5s)
+    
+    alt 사용자가 1.5s 안 "다시 걸기" 탭
+        U->>UI: 탭
+        UI->>F: _restartCall() (현재 발신 로직 재호출)
+        Note over F: pop 안 함 — 새 통화 시작
+    else 1.5s 자동 dismiss
+        UI->>UI: Navigator.pop (자동)
+        Note over U: 화면 pop
+    end
+```
+
+### 14-3. TerminateReason → SnackBar 메시지 / 버튼 매핑
+
+| TerminateReason | SnackBar 메시지 | "다시 걸기" 버튼 | 자동 pop |
+|---|---|:---:|:---:|
+| `userHangup` (사용자 hangUp 버튼) | (메시지 X) | ✗ | ✅ 즉시 |
+| `iceFailed` (ICE restart 1회 실패) | "연결 불안정으로 통화가 종료되었습니다" | ✅ | ✅ 1.5s |
+| `remoteEnded` (Senior 종결) | "통화가 종료되었습니다" | ✗ | ✅ 1.5s |
+| `remoteBusy` | "상대방이 통화 중입니다" | ✗ | ✅ 1.5s |
+| `endedByOtherCall` | "다른 가족이 영상통화를 시작했습니다" | ✗ | ✅ 1.5s |
+| `unreachable` | "상대방에게 연결할 수 없습니다" | ✗ | ✅ 1.5s |
+| `noAcceptance` | "수신자가 받지 않습니다" | ✗ | ✅ 1.5s |
+| `capacityExceeded` | "모니터링 한도 초과" | ✗ | ✅ 1.5s |
+
+### 14-4. KEP drop 떠받침 (사용자 시점)
+
+```text
+T+0     KEP wifi 자발적 drop 시작
+T+0~1   PC connectionState DISCONNECTED 감지
+        → 사용자: "연결 상태가 좋지 않습니다" 오버레이 즉시 표시
+T+0~4   grace 4s 동안 PC keepalive 자체 복구 시도
+        ├─ 복구 성공 (KEP drop 짧은 경우, ~2.3s) → 오버레이 사라짐, 통화 유지 ✅
+        └─ 복구 실패 → ICE restart 1회 시도
+T+4~5   ICE restart offer/answer 교환 (~1s)
+        → 새 ICE candidate 수집 + CONNECTED 복귀 → 오버레이 사라짐, 통화 유지 ✅
+T+4~14  answer 안 옴 (영구 끊김 등) → SnackBar "[다시 걸기]" → pop
+        → 사용자가 1탭 재발신 + 시니어 자동수락 → 5초 안에 통화 회복
+```
+
+→ 사용자 입장에서 **거의 모든 KEP drop 케이스가 ~5초 안에 자연 회복** + 그 사이 명확한 시각 피드백 ("연결 상태가 좋지 않습니다" 오버레이).
