@@ -2,7 +2,13 @@
 
 > 발견 일자: 2026-05-07
 > 디바이스: Galaxy A17 (RFKYA00Y49L) cellular 환경
-> 결론: cellular **fresh start 는 정상 작동**. wifi → cellular **handoff 중에만** 영상 검은 화면 발생 — Senior 측 stale ICE state + libwebrtc handoff 동작 의심. **TURN relay 서버로 우회 가능** (handoff 시 relay path 강제).
+> 결론:
+>
+> - cellular **fresh start** (wifi 또는 cellular 단독) — 정상 작동, 다회 검증
+> - wifi ↔ cellular **handoff** — 일반적으로 정상 (ICE candidate auto-switch 또는 ICE restart 1회로 복구)
+> - 빠른 반복 핸드오프 stress 시 **ICE restart 1회 fail → networkLost 종결** (~10% 빈도)
+> - 사용자가 봤던 "검은 화면" 은 오늘 재현 안 됨. networkLost 종결 직후 화면, reconnecting overlay (frame 고정), 또는 진짜 frame 끊김 중 어느 것인지 정확 분류 필요
+> - TURN relay 가 fail rate 낮추는 보험책 (필수는 아니지만 production 안정성 ↑)
 
 ---
 
@@ -208,6 +214,44 @@ ICE check:
 
 → 핵심 production 시나리오는 wifi/cellular fresh 가 다수. handoff edge case 는 적지만 발생 시 사용자 혼란.
 
+### 2.8 추가 재현 검증 (2026-05-07 후속)
+
+검은 화면 재현 시도 — 같은 디바이스 (A17), 같은 환경, 같은 코드. 여러 시나리오 시도:
+
+| # | 시나리오 | wifi off 시간 | 결과 |
+|---|---|---|---|
+| 1 | 모니터링 → wifi off (auto-switch) | ~5s | ✅ ICE candidate auto-switch (PC 안 끊김), BufferPool 활발 |
+| 2 | 모니터링 → wifi off (PC disconnect 유도) | ~7s | ✅ ICE restart 1회 → ice_restored (5s 만에 복구) |
+| 3 | cellular → wifi 복귀 (역방향 핸드오프) | — | ✅ ICE restart → ice_restored |
+| 4 | 영상통화 IN_CALL → wifi off | ~3s | ✅ ICE candidate auto-switch (PC 안 끊김) |
+| 5~7 | (5번 모두 정상 복구 패턴) | 다양 | ✅ ice_restored |
+
+#### Stress test — wifi on/off 7s 간격 10 cycles
+
+```text
+[1~7] wifi on/off cycles → ICE restart → ice_restored 6회 정상 복구
+[8] wifi off (17:58:19) → wifi on 못 들어옴 → ICE restart NetworkException
+    → hangup:networkLost 종결 (17:58:29)
+```
+
+**발견**: 빠른 반복 stress 에선 ICE restart 1회 시도가 **일정 빈도로 fail** → networkLost. cellular 가 reconnect 안 정착한 상태에서 ICE restart 시도 → offer 전송 자체 실패.
+
+#### 검은 화면 재현 결과
+
+- **오늘 session 에선 재현 안 됨** — 모든 정상 핸드오프 또는 networkLost 종결로 분류
+- 사용자가 이전 session 에서 봤던 "검은 화면" 은 진짜 frame 0 인지, networkLost 직후 SnackBar pop 전 화면인지, 또는 reconnecting overlay (마지막 frame 고정) 인지 정확한 분류 어려움
+- BufferPool 카운트 (= frame decode 활동) 는 모든 정상 cycle 에서 분당 5+ 유지 — 명확한 frame 끊김은 발생 안 함
+
+#### 재현되는 fail mode — networkLost (간헐적)
+
+빠른 핸드오프 stress 시 ~10% 빈도로 ICE restart NetworkException → networkLost 종결. 통화 자체 종료 = 사용자 입장 "통화 끊김" 으로 인지.
+
+**완화책**:
+
+- TURN relay 추가 시 cellular reconnect 안 정착해도 relay path 통해 ICE restart 성공 가능성↑
+- ICE restart 재시도 정책 도입 (현재 1회 → 2~3회) — fail 빈도↓, 다만 종결 지연
+- 수동 재발신은 UX 단순 (현재 정책)
+
 ---
 
 ## 3. Production 대응 — TURN 서버 도입
@@ -285,7 +329,8 @@ Twilio 등 매니지드 TURN 은 보통 **단기 credential** (TTL 24h) 발급. 
 
 - **wifi-only 사용자**: 영향 없음 (대다수 시니어)
 - **cellular fresh start (Android/iOS 모두)**: 정상 작동 — 사용자 검증 완료
-- **wifi → cellular handoff** (active session 중 wifi 끊고 cellular 로 전환): **검은 화면 가능** (A17 검증). 앱 재부팅도 즉시 회복 안 됨 — Senior 측 stale ICE state 의심.
-- **cellular → wifi handoff**: 일반적으로 OK (PC 자체 reconnect 빠름)
+- **wifi ↔ cellular handoff** (단일 전환): 일반적으로 정상 — ICE candidate auto-switch 또는 ICE restart 1회로 복구
+- **빠른 반복 핸드오프 stress**: ICE restart 1회 fail → networkLost 종결 (~10% 빈도, 2026-05-07 stress test). 통화 자체 끊김
+- **이전 보고된 검은 화면 (앱 재부팅 안 통함)**: 오늘 재현 안 됨. 누적 디바이스 상태 (Senior 측 stale ICE state 또는 carrier NAT mapping 등) 의심. 관찰 후 추가 재현 시도 필요
 
 이 제약은 [webrtc_integration_test.md](./webrtc_integration_test.md) 의 §6 "알려진 한계" 에 cross-link.
