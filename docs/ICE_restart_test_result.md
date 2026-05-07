@@ -14,6 +14,8 @@
 | 2026-04-30 | Plan B (필드 분리 모델 — `hasFlapMarker`) v1 | 자동화 sweep + raw logcat 직접 매칭 |
 | 2026-05-06 | Plan B v2 — Senior cleanup 후 (listenForStatus 시그니처 단순화, restoreActiveStatus 삭제, flapMarkerListener field, dispose clearFlapMarker, CONNECTED 전이 clearFlapMarker, registerDisconnectCleanup 시점 이동) + 자동수락 ADB tap + STREAM_VOICE_CALL mute | 자동화 sweep |
 | 2026-05-06 | Plan B v2 확장 — S6 sweep 신규 + S7 SENIOR_OFFLINE mode 추가 + S8 모니터링/영상통화 + S13 (Plan B 핵심 race) | 자동화 sweep + raw logcat 매칭 |
+| 2026-05-06 | code review fix — `_flapMarkerSub` 콜백 re-register 순서 차단 + clearFlapMarker raw remove (writeOrTimeout 노이즈 제거) + Plan B narration 주석 정리 | s1_3 + s1_3_call + s4_5 + s4_5_call sweep 5/5 PASS |
+| 2026-05-07 | iOS Sol2 검증 (S4 모니터링 + S4_5 영상통화) | Mac Mini SSH + flutter.log 실시간 매칭 |
 
 ### Plan B 핵심
 
@@ -274,10 +276,43 @@ faceDetectionSink = FaceDetectionVideoSink {
 
 ---
 
-## iOS 검증 (미검증)
+## iOS 검증 (Sol2 — UDID `00008101-001E158A1488001E`)
 
-- Mac Mini SSH 로 idevicesyslog 캡처 + 사용자 수동 wifi 토글
-- S1 (1~3s), S2 (5s), S3 (15s+) 각 1회
+### 인프라
+
+- **Mac Mini Tailscale SSH** (`100.104.120.76`) 로 빌드/로그 캡처
+- `flutter run --profile -d Sol2 2>&1 | tee ~/projects/Family/tmp/flutter.log` 로 실시간 로그 (profile 빌드도 print 잡힘)
+- Senior wifi off/on 은 Windows 에서 adb 로 자동, Family iOS 측 탭은 사용자 수동
+- Senior 영상통화 자동수락은 ADB tap (640, 400) — sweep 스크립트 동일 패턴
+
+### S4 [모니터링] — iOS (Sol2)
+
+- **실행**: 단계별 수동, Senior wifi off/on Windows adb 자동
+- **결과**: 8/8 stages 모두 ✅
+  - 1s/2s/3s/4s: ICE restored (정상 복구) — `hasFlapMarker (PC=DISCONNECTED) → 상대 wifi flap 추정` → grace 4s → ICE restart → ice_restored
+  - 5s: networkLost (Senior STOP_DELAY race)
+  - 6s: ICE restored
+  - 15s/70s: networkLost (`ICE restart answer 미수신 (10000ms) → networkLost 종결`)
+- **결론**: ✅ Plan B 의 PC state 기반 self/remote 마커 구분 + grace + ICE restart 1회 정책 모두 iOS 에서 동일 동작
+
+### S4_5 [영상통화] — iOS (Sol2)
+
+- **실행**: Sol2 영상통화 발신 + Senior 자동수락 ADB tap + 단계별 wifi off/on
+- **결과**:
+
+  | Stage | 결과 | 메커니즘 |
+  | --- | --- | --- |
+  | 1s | ✅ ICE restored | Plan B 정상 복구 |
+  | 2s | ✅ (재시도) | 1차 fail (Senior STOP_DELAY race) / 2차 success — boundary timing |
+  | 3s/4s/5s | ✅ ICE restored | 정상 |
+  | 6s | ⚠ networkLost | Senior STOP_DELAY 만료 후 dispose race (`상대방이 통화 종료 endReason=normal`) |
+  | 15s/70s | ✅ networkLost | Family ICE restart answer 10s timeout (정상 종결) |
+
+- **종결 메커니즘 두 종류**:
+  1. **Senior 측 dispose 우선**: STOP_DELAY 7s 만료 시 Senior 가 status="ended" + endReason="normal" set → Family `상대방이 통화 종료` 받고 `hangup:networkLost` (Stage 2/6)
+  2. **Family 측 timeout 우선**: ICE restart answer 10s 미수신 → `networkLost 종결` (Stage 15/70)
+- **결론**: ✅ Plan B race 가 아닌 wifi flap 자체의 Senior STOP_DELAY 7s vs PC reconnect timing race. Android 와 동일 패턴 (s4_5/s4_5_call 에서 4s/5s 도 동일 boundary).
+- **테스트 인프라 변경**: Senior 영상통화 noise 차단 위해 MonitoringSession `onTrack` 에서 remote AudioTrack `setEnabled(false)` + RingtonePlayer `setVolume(0f, 0f)` 적용 (테스트 mute 정책)
 
 ---
 
@@ -295,7 +330,8 @@ faceDetectionSink = FaceDetectionVideoSink {
 | S8 (R2 race) | ✅ PASS (Android) | ✅ PASS (Android) | 양 모드 완료 |
 | S9~S12 (1:N) | (미검증) | (미검증) | 다중 디바이스 필요 |
 | **S13 (1→2 race)** | — | ✅ **8/8 PASS (Plan B 핵심)** | 영상통화 완료 |
-| iOS 수동 | (미검증) | (미검증) | Mac Mini 필요 |
+| iOS S4 (Sol2) | ✅ 8/8 PASS | ✅ 7/8 PASS (6s boundary timing) | 양 모드 완료 |
+| iOS S1~S3 (Family wifi flap) | (미검증) | (미검증) | iOS 수동 wifi 토글 필요 |
 
 ---
 

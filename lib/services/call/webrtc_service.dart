@@ -488,18 +488,29 @@ class WebRtcService {
         () async {
           if (!_iceRestartInProgress) return;
           _iceRestartInProgress = false;
+          // PC 가 자체 reconnect 했으면 answer 미수신 무시 (PC keepalive 우선)
+          if (_peerConnection?.connectionState ==
+              RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+            print('WebRTC: ICE restart answer 미수신 (${_iceRestartAnswerTimeoutMs}ms) but PC=CONNECTED → networkLost skip');
+            return;
+          }
           print('WebRTC: ICE restart answer 미수신 (${_iceRestartAnswerTimeoutMs}ms) → networkLost 종결');
           await hangUp(reason: TerminateReason.networkLost);
           onCallEnded?.call();
         },
       );
     } catch (e) {
-      print('WebRTC: ICE restart 실패 → networkLost 종결: $e');
       _iceRestartInProgress = false;
-      if (!_isEnding) {
-        await hangUp(reason: TerminateReason.networkLost);
-        onCallEnded?.call();
+      if (_isEnding) return;
+      // PC 가 자체 reconnect 했으면 ICE restart 실패 무시 (race — PC keepalive 우선)
+      if (_peerConnection?.connectionState ==
+          RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
+        print('WebRTC: ICE restart 실패했지만 PC=CONNECTED → networkLost skip: $e');
+        return;
       }
+      print('WebRTC: ICE restart 실패 → networkLost 종결: $e');
+      await hangUp(reason: TerminateReason.networkLost);
+      onCallEnded?.call();
     }
   }
 
