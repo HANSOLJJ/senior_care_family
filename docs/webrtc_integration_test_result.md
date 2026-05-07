@@ -19,6 +19,7 @@
 | 2026-05-07 | iOS S1_3 (Family wifi flap) 검증 + PC keepalive reconnect / ICE restart NetworkException race 발견 + fix (`webrtc_service.dart` PC=CONNECTED skip) | iOS Sol2 수동 wifi 토글 |
 | 2026-05-07 | 1:N S9~S12 검증 + capacity 정책 매트릭스 doc 정합화 (`call-scenarios.md §10-2/10-3/10-3-1`) | Android A + iOS B + Android C 3대 |
 | 2026-05-07 | S14 displace 검증 (R3) — A monitor → B call → A `otherCallStarted` | iOS Sol2 monitor + R3CR... call |
+| 2026-05-07 | S15 동시 call race (NX5) — Senior 측 첫 도달 winner, 나머지 remoteBusy | R3CR... + RFKYA00Y49L 동시 tap |
 
 ### Plan B 핵심
 
@@ -278,6 +279,24 @@
   - Senior: A peer ENDED + B peer IN_CALL (peer=1)
 - **S11 과 차이**: S11 = A는 call IN_CALL, 새 요청은 모두 `remoteBusy` 거절. S14 = A는 monitor, 새 call 들어오면 A 가 `otherCallStarted` 로 displace. 둘 다 "call 우선" 정책의 양면.
 
+### S15 — A·B 동시 call 발신 race
+
+- **흐름**: Family A=R3CR700SEKP + Family C=RFKYA00Y49L 거의 동시 영상통화 발신
+- **trace** (16:01:06):
+  - C startCall: 16:01:06.494 (50ms 먼저)
+  - A startCall: 16:01:06.587
+  - C 통화 생성: 16:01:06.799 callId=`-Os0EMaEzJdSBnDIQJz5`
+  - A 통화 생성: 16:01:06.833 callId=`-Os0EMawnRCmIZ9Fpqtc`
+  - **Senior 처리 순서** (16:01:06.210~316):
+    - 모니터링 시작: callId=`-Os0EMawnRCmIZ9Fpqtc` (A 먼저 도달)
+    - 이미 call 진행 중 → call 거절 (remoteBusy): callId=`-Os0EMaEzJdSBnDIQJz5` (C)
+  - C: `endReason=remoteBusy` → `hangup:remoteBusy` → terminated
+  - A: connected → senior_accepted_auto → upgrading → renegotiate_done → IN_CALL ✅
+- **결론**: ✅ PASS — Senior race resolution 정상
+  - C 가 startCall 50ms 먼저였지만 A 가 winner — RTDB 도달 순서가 결정 (Firebase internal queue + 네트워크 latency)
+  - 정확히 한쪽만 IN_CALL, 다른 쪽 `remoteBusy` 거절
+  - 좀비 통화 0건
+
 ---
 
 ## Plan B v2 재검증 (2026-05-06)
@@ -417,7 +436,10 @@ faceDetectionSink = FaceDetectionVideoSink {
 | S11 (call remoteBusy) | — | ✅ A IN_CALL / B remoteBusy | call+monitor 모두 거절 |
 | S12 (capacity 매트릭스) | ✅ peers≤3, call≤1 | ✅ 일시 peer=4 허용 | 정책 검증 + doc 갱신 |
 | S14 (displace) | ✅ A monitor displaced / B call IN_CALL | — | otherCallStarted 정상 발화 |
-| S15~S18 (race) | (미검증, optional) | (미검증) | 시간 날 때 |
+| S15 (동시 call race) | — | ✅ winner=A, loser=C remoteBusy | RTDB 도달 순서 결정 |
+| S16 (multi Family wifi off) | (미검증) | (미검증) | S1~3 multi 버전 |
+| S17 (multi Senior wifi off) | (미검증) | (미검증) | S4_5 multi 버전 |
+| S18~S19 (race / capacity boundary) | (미검증, optional) | (미검증) | 시간 날 때 |
 | **S13 (1→2 race)** | — | ✅ **8/8 PASS (Plan B 핵심)** | 영상통화 완료 |
 | iOS S4 (Sol2) | ✅ 8/8 PASS | ✅ 7/8 PASS (6s boundary timing) | 양 모드 완료 |
 | iOS S1_3 (Sol2 wifi flap) | — | ✅ PASS + race fix 검증 | 영상통화 완료 (PC reconnect race 발견 + 차단) |

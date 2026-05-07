@@ -506,33 +506,65 @@ WebRTC: 모니터링 → 통화 전환
 
 ---
 
-### S16 — A·B 동시 wifi off (병렬 ICE restart race)
+### S16 — Family 양쪽 동시 wifi off (S1~3 multi-device 버전)
+
+> S1~S3 (Family wifi flap) 의 1:N 변형. Family A + B 가 동시에 wifi off → Senior 측이 두 peer 의 ICE restart 를 병렬 처리할 수 있는지 검증.
 
 **사전 조건**: Family A + Family B 모두 모니터링 active. 둘 다 Android (adb wifi off 자동화).
 
-**재현 (수동, 동시 wifi off 권장)**:
+**재현 (자동화 sweep, timing 변주)**:
 
 1. A + B 모니터링 둘 다 CONNECTED
 2. `adb -s <A>` + `adb -s <B>` wifi off 거의 동시에 (~100ms 이내)
-3. ~5초 후 양쪽 wifi on
+3. wifi off N초 (1/2/3/4/5/6/15/70s) 후 양쪽 wifi on
 
 **기대 동작**:
 
 - A + B 모두 PC disconnect → grace 4s → ICE restart 시도
 - Senior 측: 두 peer 모두 RESTARTING + STOP_DELAY 7s 예약
-- 두 ICE restart offer 거의 동시 수신 → 직렬 처리 (race 우려 지점)
-- 운 좋으면 둘 다 ice_restored, 운 나쁘면 한쪽 networkLost
+- 두 ICE restart offer 거의 동시 수신 → Senior 직렬 처리
+- 짧은 wifi off (1~5s): 둘 다 ice_restored 기대
+- 긴 wifi off (15s+): 둘 다 networkLost 자연 종결
 
 **PASS 판정**:
 
 - 좀비 peer 0건 (Senior 측 정리 확실) ✅
-- 다른 monitor 통화 영향 없음 ✅
+- 두 peer 처리 결과 대칭 (둘 다 복구 또는 둘 다 종결) ✅
+- callId 충돌 / Senior peer slot 손상 없음 ✅
 
-> Family B 가 iOS Sol2 인 경우 wifi off 자동화 불가 → A=Galaxy S21, B=Galaxy A17 조합 권장.
+> Family B 가 iOS Sol2 인 경우 wifi off 자동화 불가 → A=Galaxy S21, B=Galaxy A17 조합 권장. monitor + 영상통화 모드 모두 검증.
 
 ---
 
-### S17 — A grace 중 B 신규 합류 race
+### S17 — Senior wifi off + Family 2대 (S4_5 multi-device 버전)
+
+> S4~S5 (Senior wifi flap) 의 1:N 변형. Senior wifi off 시 두 Family 가 어떻게 대칭/비대칭 처리되는지 검증.
+
+**사전 조건**: Family A + Family B 모두 모니터링 active.
+
+**재현 (자동화 sweep)**:
+
+1. A + B 모니터링 둘 다 CONNECTED
+2. Senior wifi off N초 (1/2/3/4/5/6/15/70s)
+3. Senior wifi on
+
+**기대 동작**:
+
+- A + B 양쪽 PC disconnect → grace 4s → ICE restart 시도
+- Senior 측: PC keepalive 끊김 → STOP_DELAY 7s 예약
+- 짧은 wifi off (1~3s): Senior 빠른 reconnect → 둘 다 ice_restored
+- 긴 wifi off (5s+): Senior STOP_DELAY 만료 → 양쪽 모두 status=ended → 둘 다 networkLost
+- 핵심: A 와 B 의 처리 **대칭** (한쪽만 살아남는 비대칭 race 없어야)
+
+**PASS 판정**:
+
+- 양쪽 결과 대칭 ✅ (둘 다 복구 OR 둘 다 종결)
+- Senior 측 두 peer 모두 정리 ✅
+- monitor + 영상통화 모드 모두 검증
+
+---
+
+### S18 — A grace 중 B 신규 합류 race
 
 **사전 조건**: Family A 모니터링 active. Family B FamilyDetailScreen.
 
@@ -557,7 +589,7 @@ WebRTC: 모니터링 → 통화 전환
 
 ---
 
-### S18 — A·B 동시 발신 후 capacity boundary
+### S19 — A·B 동시 발신 후 capacity boundary
 
 **사전 조건**: Senior peers=2 (A monitor + B monitor). Family C/D 동시 monitor 시도.
 

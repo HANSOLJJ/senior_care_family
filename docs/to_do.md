@@ -54,12 +54,17 @@
 - [x] **S12** Capacity 매트릭스 (`monitor ≤ 3`, `call ≤ 1`, 동시 max peer = 4) (구 NX4)
 - [x] **S14** displace 절차 — A monitor → B call → A `endedByOtherCall` (구 R3)
 
+**검증 완료 추가** (2026-05-07):
+
+- [x] **S14** displace 절차 — A monitor → B call → A `endedByOtherCall` (구 R3)
+- [x] **S15** A·B 동시 call 발신 race → 한쪽만 성공 (구 NX5)
+
 **남은 race 시나리오** (Optional, 시간 날 때):
 
-- [ ] **S15** A·B 동시 call 발신 race → 한쪽만 성공
-- [ ] **S16** A·B 동시 wifi off → 병렬 ICE restart (Family 양쪽 Android 필요)
-- [ ] **S17** A grace 중 B 신규 합류 → A 복구 + B connected (timing 정밀)
-- [ ] **S18** A·B·C·D 동시 발신 후 capacity boundary
+- [ ] **S16** Family 양쪽 동시 wifi off (S1~3 multi-device 버전, 구 NX3)
+- [ ] **S17** Senior wifi off + Family 2대 (S4_5 multi-device 버전)
+- [ ] **S18** A grace 중 B 신규 합류 race (구 NX1)
+- [ ] **S19** A·B·C·D 동시 발신 capacity boundary (구 NX5 변형)
 
 **Skip / 코드 review 로 갈음**:
 
