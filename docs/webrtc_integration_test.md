@@ -568,6 +568,13 @@ WebRTC: 모니터링 → 통화 전환
 
 **사전 조건**: Family A 모니터링 active. Family B FamilyDetailScreen.
 
+**재현 (자동화)**:
+
+```bash
+JOIN_DELAY_S=2.5 bash e:/App/Family/scripts/s18_auto.sh   # grace 만료 직전 B 합류
+bash e:/App/Family/scripts/s18_sweep.sh                    # 1/2/2.5/3/3.5/5/7s 7 stages
+```
+
 **재현 (수동, timing 정밀 필요)**:
 
 1. A 모니터링 active
@@ -645,6 +652,10 @@ WebRTC: 모니터링 → 통화 전환
 | [scripts/s6_auto.sh](../scripts/s6_auto.sh) | upgrade + ICE flap | S6 |
 | [scripts/s7_auto.sh](../scripts/s7_auto.sh) | connecting phase + wifi off | S7 |
 | [scripts/s8_auto.sh](../scripts/s8_auto.sh), [scripts/s8_call_auto.sh](../scripts/s8_call_auto.sh) | R2 race | S8 |
+| [scripts/s16_auto.sh](../scripts/s16_auto.sh) + [s16_sweep.sh](../scripts/s16_sweep.sh) | Family 양쪽 동시 wifi off | S16 |
+| [scripts/s17_auto.sh](../scripts/s17_auto.sh) + [s17_sweep.sh](../scripts/s17_sweep.sh) | Senior wifi off + Family 2대 | S17 |
+| [scripts/s18_auto.sh](../scripts/s18_auto.sh) + [s18_sweep.sh](../scripts/s18_sweep.sh) | A grace 중 B 합류 (timing 변주) | S18 |
+| [scripts/cellular_repro_a17.sh](../scripts/cellular_repro_a17.sh) | A17 cellular handoff 검은 화면 재현 | cellular_ice_investigation §6 |
 
 ---
 

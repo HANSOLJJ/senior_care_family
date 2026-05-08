@@ -2,8 +2,7 @@
 
 > 본 문서는 [webrtc_integration_test.md](./webrtc_integration_test.md) 시나리오 (ICE restart + 1:N 정책 + race) 의 검증 결과 누적.
 >
-> **Plan B (필드 분리 모델, 2026-04-30)** 시점부터 결과 기록. 이전 Plan A 시절 결과는
-> [ICE_restart_test_result_backup.md](./ICE_restart_test_result_backup.md) 참조.
+> **Plan B (필드 분리 모델, 2026-04-30)** 시점부터 결과 기록.
 
 ---
 
@@ -20,6 +19,8 @@
 | 2026-05-07 | 1:N S9~S12 검증 + capacity 정책 매트릭스 doc 정합화 (`call-scenarios.md §10-2/10-3/10-3-1`) | Android A + iOS B + Android C 3대 |
 | 2026-05-07 | S14 displace 검증 (R3) — A monitor → B call → A `otherCallStarted` | iOS Sol2 monitor + R3CR... call |
 | 2026-05-07 | S15 동시 call race (NX5) — Senior 측 첫 도달 winner, 나머지 remoteBusy | R3CR... + RFKYA00Y49L 동시 tap |
+| 2026-05-08 | S17 Senior wifi off + Family 2대 — 1~3s 대칭 복구, 4~70s 대칭 networkLost. race 0건 | s17_sweep.sh + 4~70s 재실행 |
+| 2026-05-08 | S18 A grace 중 B 신규 합류 race — 7/7 PASS. B 매번 connected, A 일관 networkLost. peer slot 손상 0건 | s18_sweep.sh (JOIN_DELAY 1~7s) |
 
 ### Plan B 핵심
 
@@ -296,6 +297,49 @@
   - C 가 startCall 50ms 먼저였지만 A 가 winner — RTDB 도달 순서가 결정 (Firebase internal queue + 네트워크 latency)
   - 정확히 한쪽만 IN_CALL, 다른 쪽 `remoteBusy` 거절
   - 좀비 통화 0건
+
+### S17 — Senior wifi off + Family 2대 (2026-05-08)
+
+- **흐름**: Family A=R3CR700SEKP + Family C=RFKYA00Y49L 양쪽 모니터링 active 상태 → Senior 측 wifi off 시 두 peer 의 대칭/비대칭 처리 검증
+- **실행**: `bash e:/App/Family/scripts/s17_sweep.sh` (1/2/3/4/5/6/15/70s 8 stages, 일부 1차 setup 실패로 4~70s 재실행)
+
+|Stage|1차 결과|재실행 결과|분류|
+|---|---|---|---|
+|1s|✅ 대칭 복구 (양쪽 ice_restored)|—|Senior STOP_DELAY 안 — 양쪽 ICE restart 1회 성공|
+|2s|✅ 대칭 복구|—|동일|
+|3s|✅ 대칭 복구|—|동일|
+|4s|⚠ 비대칭 (A networkLost / C 복구)|✅ 대칭 networkLost|외부 인터럽션 (긴급재난 알림 등) 가능성 — 재실행에서 일관 대칭|
+|5s|⚠ 비대칭 (A 복구 / C networkLost)|✅ 대칭 networkLost|동일 — 재실행에서 일관 대칭|
+|6s|(setup fail)|✅ 대칭 networkLost|양쪽 ICE restart fail → networkLost|
+|15s|(setup fail)|✅ 대칭 networkLost|Senior STOP_DELAY 만료 후 양쪽 종결|
+|70s|(setup fail)|✅ 대칭 networkLost|동일|
+
+- **결론**: ✅ PASS
+  - 1~3s: 양쪽 ICE restart 성공 — Senior 빠른 wifi 복귀로 양쪽 grace 안에 1-shot 처리
+  - 4s 이상: 양쪽 networkLost 정상 종결 — Senior STOP_DELAY 만료 또는 Family ICE restart fail (ICE restart 정책상 1회 시도)
+  - 1차 sweep 4s/5s 비대칭: race 아닌 외부 인터럽션 / 개별 ICE restart fail rate (~5~10%) 가 두 디바이스 차이로 발현된 케이스. 재실행 시 일관된 대칭 networkLost 로 race 가설 기각
+  - Senior 측 두 peer 처리 race 0건 — `MonitoringSession` 직렬 처리 정상
+
+### S18 — A grace 중 B 신규 합류 race (2026-05-08)
+
+- **흐름**: Family A=R3CR700SEKP 모니터링 active → A wifi off → grace 시작 → JOIN_DELAY 후 Family B=RFKYA00Y49L 신규 모니터링 발신 → A grace 만료 + ICE restart 시도 → 결과 관찰
+- **실행**: `bash e:/App/Family/scripts/s18_sweep.sh` (JOIN_DELAY 1/2/2.5/3/3.5/5/7s, A_OFF=8s)
+
+|JOIN_DELAY|A 결과|B 결과|분류|
+|---|---|---|---|
+|1s (grace 시작 직후)|ice_restored=1 + networkLost=1|connected=1|✅ peer slot 정확|
+|2s (grace 안)|networkLost=1|connected=1|✅|
+|2.5s (grace 만료 직전)|networkLost=1|connected=1|✅|
+|3s (grace 만료 직전)|ice_restored=1 + networkLost=1|connected=1|✅|
+|3.5s (grace 만료 임박)|networkLost=1|connected=1|✅|
+|5s (ICE restart 진행 중)|ice_restored=1 + networkLost=1|connected=1|✅|
+|7s (A networkLost 종결 후)|networkLost=1|connected=1|✅|
+
+- **결론**: ✅ 7/7 PASS — A grace 안의 어느 시점에 B 가 합류해도 Senior peer slot 손상 0건
+  - **B 매번 정상 connected** (capacity 거절 / connect 실패 0건)
+  - **A 일관된 networkLost 종결** (A_OFF=8s 긴 단절 정상)
+  - 일부 stage 의 ice_restored=1 + networkLost=1 = ICE restart 1회 성공 후 후속 disconnect 로 종결 (sticky 정책)
+  - Senior 측 peer 카운터 race 없음 — `monitoringSessions` 추가/삭제가 A grace timer 와 독립 동작 확인
 
 ---
 

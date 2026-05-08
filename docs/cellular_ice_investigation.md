@@ -331,6 +331,100 @@ Twilio 등 매니지드 TURN 은 보통 **단기 credential** (TTL 24h) 발급. 
 - **cellular fresh start (Android/iOS 모두)**: 정상 작동 — 사용자 검증 완료
 - **wifi ↔ cellular handoff** (단일 전환): 일반적으로 정상 — ICE candidate auto-switch 또는 ICE restart 1회로 복구
 - **빠른 반복 핸드오프 stress**: ICE restart 1회 fail → networkLost 종결 (~10% 빈도, 2026-05-07 stress test). 통화 자체 끊김
-- **이전 보고된 검은 화면 (앱 재부팅 안 통함)**: 오늘 재현 안 됨. 누적 디바이스 상태 (Senior 측 stale ICE state 또는 carrier NAT mapping 등) 의심. 관찰 후 추가 재현 시도 필요
+- **이전 보고된 검은 화면 (앱 재부팅 안 통함, 5분 대기 안 통함, wifi 복귀로만 풀림)**: 2026-05-07/08 자동화 sweep 80+ cycles 시도해도 재현 0건. 간헐적 이슈로 분류. 다음 발생 시 즉시 [scripts/cellular_repro_a17.sh](../scripts/cellular_repro_a17.sh) 로 그 시점 잡을 수 있는 인프라 확보. wifi 만이 fail mode 풀어준 사실 = carrier NAT 또는 modem stuck (§2 가설 H4/H5 미해결)
+- **cellular 통화 종결 시 RTDB `status=ended` 반영 지연**: cellular 환경에서 hangup 시 ended 가 한참 후 (수~수십 초) 반영되는 현상 관찰. §7-E 참고
 
 이 제약은 [webrtc_integration_test.md](./webrtc_integration_test.md) 의 §6 "알려진 한계" 에 cross-link.
+
+---
+
+## 6. 다음에 해볼 테스트 후보
+
+이전 session 에서 봤던 검은 화면 재현 + 진짜 root cause 분리용. 우선순위 순.
+
+### 6-A. 반복 핸드오프 stress (wifi off/on 5~10회 빠르게)
+
+**의도**: 2026-05-07 stress test 와 유사하지만 **간격 / 모드 변주**로 fail mode 분포 정량화.
+
+- 변주: off/on 간격 3s / 5s / 7s / 10s × 모드 (모니터링 / 영상통화) × cycle 수 (5 / 10 / 20)
+- 측정: ice_restored vs networkLost 비율, BufferPool count 단절 구간
+- 자동화 가능 — A17 (RFKYA00Y49L) `svc wifi disable/enable` 반복 스크립트
+
+### 6-B. 영상통화 모드 핸드오프 (earlier session 검은 화면이 call 모드)
+
+**의도**: 이전 검은 화면 보고는 **영상통화 (`CALL_TYPE=call`)** 에서 발생. 모니터링 모드와 ICE negotiation flow 가 다름 (양방향 audio + video upgrade) → 검은 화면 재현 가능성↑.
+
+- 시나리오:
+  1. A17 wifi → 영상통화 발신 → senior_accepted_auto + upgrade 완료 (IN_CALL)
+  2. 안정화 5~10s
+  3. wifi off → cellular handoff
+  4. 영상 frame 단절 여부 + audio path 유지 여부 분리 측정
+- 자동화: `CALL_TYPE=call STABILIZE_S=30 bash scripts/s1_3_auto.sh` 변형 (A17 디바이스 대상)
+- 추가 측정: video sender BufferPool vs audio packet count 분리
+
+### 6-C. 모니터링 종료 → 재발신 반복
+
+**의도**: 이전 세션에서 검은 화면이 **재발신 후** fail. 첫 통화는 OK, 두번째 발신부터 fail. Senior 측 stale ICE state 가설과 연결.
+
+- 시나리오:
+  1. A17 cellular 모니터링 발신 → connected → 종료
+  2. 재발신 (간격 3s / 10s / 30s 변주) → connected 여부 + frame decode 확인
+  3. 5~10회 반복 → fail 누적 패턴 검증
+- 측정: 재발신마다 ICE candidate 개수 변화 (28 → 24 → 20 → 16 패턴 §2.3 재현되는지)
+
+### 6-D. 긴 cellular 유지 (30s+ wifi off) → wifi on 복귀
+
+**의도**: 짧은 wifi off (1~7s) 만 검증했음. 30s+ 긴 끊김에서 networkLost 정상 종결 후 cellular only 상태 유지 → 장기 cellular 안정성 검증.
+
+- 시나리오:
+  1. A17 wifi 모니터링 → 30s+ wifi off (networkLost 종결 강제)
+  2. cellular only 상태에서 새 모니터링/영상통화 발신 → 정상 동작 여부
+  3. 다시 wifi on → 새 발신 → 정상 동작 여부
+- 자동화: `FAMILY_OFF_S=70 bash scripts/s1_3_auto.sh` + 종결 후 추가 발신 단계
+
+### 6-E. cellular 측 RTDB `status=ended` 반영 지연 측정
+
+**의도**: 사용자 보고 — cellular 에서 통화 끄면 RTDB `status=ended` 반영이 wifi 대비 한참 늦음 (수 초 ~ 수십 초). hangup 시점 → RTDB write 시점 → Senior `listenForStatus` 수신 시점 사이 어디서 지연되는지 분리.
+
+가설:
+
+- cellular 의 RTDB write latency (carrier RTT + RTDB persistent connection 끊김 후 재연결 시간)
+- onDisconnect handler 발화 (앱 종료 시) — 정상 hangup 이지만 socket close 가 cellular 에서 늦게 감지
+
+측정 항목:
+
+- T1: Family 의 hangup 호출 timestamp (logcat `hangUp(reason=...)`)
+- T2: RTDB `status=ended` write 완료 timestamp (logcat `시그널링: status=ended write 완료`)
+- T3: Senior 의 `listenForStatus` ended 수신 timestamp
+- T2-T1 (Family write latency), T3-T2 (RTDB → Senior propagation latency) 분리
+
+비교 baseline:
+
+- A17 wifi: T2-T1 < 200ms, T3-T2 < 500ms 기대
+- A17 cellular: 사용자 보고 "한참 후" — 실제 몇 초인지 측정
+
+방치 시 부작용: 종결 다이얼로그 늦게 떠서 사용자 혼란, Senior 측 STOP_DELAY 가 먼저 만료해서 별도 정리 흐름 진입.
+
+---
+
+## 7. 추가 검증 결과
+
+### 2026-05-08 — A17 자동화 sweep ([scripts/cellular_repro_a17.sh](../scripts/cellular_repro_a17.sh))
+
+검은 화면 재현 시도 — 단일 디바이스 (RFKYA00Y49L) 전체 phase sweep + 스크린샷 자동 밝기 검사 (threshold luminance < 15 = BLACK).
+
+|#|테스트|결과|비고|
+|---|---|---|---|
+|6-A|반복 핸드오프 stress (모니터링, off 5s / on 12s, 20 cycles 시도)|⚠ networkLost 1건 (cycle 2 에서 조기 종결), ice_restored 1건|어제 stress 와 동일한 ~5~10% fail rate|
+|6-A 가혹|반복 핸드오프 stress 강화 (off 7s / on 3s, **50 cycles**)|✅ networkLost 0건, ice_restored 1건, **검은 화면 0건**|짧은 안정화에서도 PC keepalive 자가 복구 대부분 흡수|
+|6-B|영상통화 핸드오프 (5 cycles, IN_CALL → wifi off 7s)|✅ 5/5 ice_restored, BufferPool 11~12 정상, **검은 화면 0건**|단일 핸드오프는 안정|
+|6-C|cellular only 재발신 반복 (20 cycles)|✅ 20/20 success, BufferPool 6~7, **검은 화면 0건**|이전 fail mode (28→16 ICE candidate 감소) 재현 ✗|
+|6-D|긴 cellular 유지 (70s wifi off + 신규 발신)|✅ networkLost 0 (auto-switch), cellular only 신규 monitor 정상|장기 cellular 안정|
+|6-E|RTDB ended 지연 측정 (wifi 3 + cellular 3 hangup)|✅ wifi/cellular 차이 사실상 없음 (수십 ms 이내)|사용자 보고 "수 초~수십 초" 지연 재현 ✗|
+
+### 핵심 결론
+
+- **이전 보고된 검은 화면 + ended 지연은 간헐적 이슈** — 4월~5월 초 stress + 자동화 sweep 합쳐 80+ cycles 시도해도 BufferPool=0 / ICE candidate 감소 패턴 재현 0건
+- **유일한 재현되는 fail mode** — 빠른 핸드오프 stress 시 networkLost (~5~10% 빈도). 통화 자체 끊김
+- **다음 발생 시 즉시 캡처용 인프라 확보** — `bash scripts/cellular_repro_a17.sh` + screenshot brightness 자동 감지로 그 시점 잡을 수 있음
+- 사용자 화면이 ground truth — 자동 BLACK 판정은 어두운 영상 / reconnecting overlay false positive 가능 (threshold 15 로 낮춰서 완화)
