@@ -14,21 +14,26 @@ import 'signaling_service.dart';
 const _iceServers = {
   'iceServers': [
     {'urls': 'stun:stun.l.google.com:19302'},
-    {'urls': 'stun:stun1.l.google.com:19302'},
+    {'urls': 'stun:stun.relay.metered.ca:80'},
     {
-      'urls': 'turn:a.relay.metered.ca:80',
-      'username': 'e8dd65e92f6e86cfe1ef0635',
-      'credential': 'dktMDqpJIcMw4VYz',
+      'urls': 'turn:global.relay.metered.ca:80',
+      'username': 'f4710edcec8720da29501095',
+      'credential': 'aM7wNKpB3rImuoCh',
     },
     {
-      'urls': 'turn:a.relay.metered.ca:443',
-      'username': 'e8dd65e92f6e86cfe1ef0635',
-      'credential': 'dktMDqpJIcMw4VYz',
+      'urls': 'turn:global.relay.metered.ca:80?transport=tcp',
+      'username': 'f4710edcec8720da29501095',
+      'credential': 'aM7wNKpB3rImuoCh',
     },
     {
-      'urls': 'turn:a.relay.metered.ca:443?transport=tcp',
-      'username': 'e8dd65e92f6e86cfe1ef0635',
-      'credential': 'dktMDqpJIcMw4VYz',
+      'urls': 'turn:global.relay.metered.ca:443',
+      'username': 'f4710edcec8720da29501095',
+      'credential': 'aM7wNKpB3rImuoCh',
+    },
+    {
+      'urls': 'turns:global.relay.metered.ca:443?transport=tcp',
+      'username': 'f4710edcec8720da29501095',
+      'credential': 'aM7wNKpB3rImuoCh',
     },
   ],
 };
@@ -352,6 +357,36 @@ class WebRtcService {
     _aecStatsTimer = null;
   }
 
+  /// (`Utility`) ICE selected pair 로그 — TURN 실제 사용 여부 확인용
+  ///
+  /// PC=CONNECTED 진입 후 ICE finalizing 시간 (~1.5s) 지나서 호출.
+  /// `candidateType`: host (LAN) / srflx (STUN) / prflx (peer reflexive) / relay (TURN).
+  /// `relay` 가 한 번이라도 나오면 TURN credential 작동 확정.
+  Future<void> _logSelectedCandidatePair(String trigger) async {
+    final pc = _peerConnection;
+    if (pc == null) return;
+    try {
+      final stats = await pc.getStats();
+      for (final report in stats) {
+        final v = report.values;
+        if (report.type == 'candidate-pair' &&
+            v['nominated'] == true &&
+            v['state'] == 'succeeded') {
+          final localId = v['localCandidateId'];
+          final remoteId = v['remoteCandidateId'];
+          final local = stats.firstWhere((r) => r.id == localId, orElse: () => report);
+          final remote = stats.firstWhere((r) => r.id == remoteId, orElse: () => report);
+          print('ICE selected pair (trigger=$trigger): '
+              'local=${local.values['candidateType']}/${local.values['protocol']} '
+              'remote=${remote.values['candidateType']}/${remote.values['protocol']} '
+              'rtt=${v['currentRoundTripTime']}');
+        }
+      }
+    } catch (e) {
+      print('ICE selected pair 로그 실패: $e');
+    }
+  }
+
   // ─── PC 콜백 헬퍼 (4개 PC 생성 지점 공통) ───
 
   /// (`Callback`) 원격 트랙 수신 — `_remoteStream`/`remoteRenderer` 세팅
@@ -433,10 +468,15 @@ class WebRtcService {
       _iceRestartAnswerTimer?.cancel();
       _iceRestartAnswerTimer = null;
       isReconnecting.value = false;
+      final wasReconnecting = _fsm.phase.value == CallPhase.reconnecting;
       // reconnecting → connected 복귀 (ICE restart 성공 또는 PC 자가 복구)
-      if (_fsm.phase.value == CallPhase.reconnecting) {
+      if (wasReconnecting) {
         _fsm.to(CallPhase.connected, reason: 'ice_restored');
       }
+      // ICE finalizing 시간 확보 후 selected pair 로깅
+      Timer(const Duration(milliseconds: 1500), () {
+        _logSelectedCandidatePair(wasReconnecting ? 'ice_restored' : 'initial_connect');
+      });
     }
   }
 
