@@ -144,14 +144,20 @@ echo "  Family A: ice_restored=$ICE_RESTORED_A networkLost=$NETWORK_LOST_A skip=
 echo "  Family C: ice_restored=$ICE_RESTORED_C networkLost=$NETWORK_LOST_C skip=$ICE_SKIP_C"
 
 # 대칭성 분류
+# 비대칭 케이스는 race 가 아닌 디바이스 cellular 가용성 차이일 수 있음 (S16 result md 참고).
+# 한쪽이 cellular IN_SERVICE 면 wifi off 시 fallback 으로 PC 유지 → ice_restored,
+# 다른 쪽이 cellular DENIED/OUT_OF_SERVICE 면 RTDB unreachable → ICE restart fail → networkLost.
+# 비대칭 발생 시 양쪽 디바이스의 telephony 상태 (mServiceState, mDataConnectionState) 확인 필요.
 if [ "$NETWORK_LOST_A" -eq 0 ] && [ "$NETWORK_LOST_C" -eq 0 ] && [ "$ICE_RESTORED_A" -gt 0 ] && [ "$ICE_RESTORED_C" -gt 0 ]; then
   echo "[S16] ✅ 대칭 복구 — 양쪽 ice_restored"
 elif [ "$NETWORK_LOST_A" -gt 0 ] && [ "$NETWORK_LOST_C" -gt 0 ]; then
   echo "[S16] ✅ 대칭 networkLost 종결 (긴 단절 정상)"
 elif [ "$NETWORK_LOST_A" -eq 0 ] && [ "$NETWORK_LOST_C" -gt 0 ]; then
-  echo "[S16] ⚠ 비대칭: A 복구 / C networkLost — race 검토"
+  echo "[S16] ⚠ 비대칭: A 복구 / C networkLost — cellular 가용성 차이 또는 race 검토"
+  echo "[S16]   힌트: 양쪽 mobile data 상태 확인 (adb shell dumpsys telephony.registry | grep mServiceState)"
 elif [ "$NETWORK_LOST_A" -gt 0 ] && [ "$NETWORK_LOST_C" -eq 0 ]; then
-  echo "[S16] ⚠ 비대칭: A networkLost / C 복구 — race 검토"
+  echo "[S16] ⚠ 비대칭: A networkLost / C 복구 — cellular 가용성 차이 또는 race 검토"
+  echo "[S16]   힌트: 양쪽 mobile data 상태 확인 (adb shell dumpsys telephony.registry | grep mServiceState)"
 else
   echo "[S16] ⚠ 분류 불명확 — raw log 확인"
 fi

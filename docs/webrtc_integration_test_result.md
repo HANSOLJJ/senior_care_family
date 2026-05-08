@@ -19,6 +19,7 @@
 | 2026-05-07 | 1:N S9~S12 검증 + capacity 정책 매트릭스 doc 정합화 (`call-scenarios.md §10-2/10-3/10-3-1`) | Android A + iOS B + Android C 3대 |
 | 2026-05-07 | S14 displace 검증 (R3) — A monitor → B call → A `otherCallStarted` | iOS Sol2 monitor + R3CR... call |
 | 2026-05-07 | S15 동시 call race (NX5) — Senior 측 첫 도달 winner, 나머지 remoteBusy | R3CR... + RFKYA00Y49L 동시 tap |
+| 2026-05-08 | S16 Family 양쪽 동시 wifi off — 1~6s 대칭 복구, 15/70s A networkLost+C 복구 (A LG U+ DENIED, C KT cellular fallback). race 아닌 cellular 가용성 차이 | s16_sweep.sh |
 | 2026-05-08 | S17 Senior wifi off + Family 2대 — 1~3s 대칭 복구, 4~70s 대칭 networkLost. race 0건 | s17_sweep.sh + 4~70s 재실행 |
 | 2026-05-08 | S18 A grace 중 B 신규 합류 race — 7/7 PASS. B 매번 connected, A 일관 networkLost. peer slot 손상 0건 | s18_sweep.sh (JOIN_DELAY 1~7s) |
 
@@ -297,6 +298,31 @@
   - C 가 startCall 50ms 먼저였지만 A 가 winner — RTDB 도달 순서가 결정 (Firebase internal queue + 네트워크 latency)
   - 정확히 한쪽만 IN_CALL, 다른 쪽 `remoteBusy` 거절
   - 좀비 통화 0건
+
+### S16 — Family 양쪽 동시 wifi off (2026-05-08)
+
+- **흐름**: Family A=R3CR700SEKP + Family C=RFKYA00Y49L 양쪽 모니터링 active 상태 → 양쪽 동시 wifi off → 양쪽 PC disconnect → grace 4s → ICE restart 시도 (cellular fallback 가용성 따라 결과 분기)
+- **실행**: `bash e:/App/Family/scripts/s16_sweep.sh` (1/2/3/4/5/6/15/70s 8 stages)
+
+|Stage|A 결과|C 결과|판정|
+|---|---|---|---|
+|1s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|2s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|3s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|4s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|5s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|6s|ice_restored=1|ice_restored=1|✅ 대칭 복구|
+|15s|networkLost=1|ice_restored=1|⚠ 비대칭 — A cellular 비활성|
+|70s|networkLost=1|ice_restored=2|⚠ 비대칭 — A cellular 비활성, C cellular↔wifi 핸드오프 2회|
+
+- **15s/70s 비대칭 원인 (race 아님)** — 디바이스 cellular 가용성 차이:
+  - **A (S21, LG U+)**: `mServiceState=OUT_OF_SERVICE`, `registrationState=DENIED`, `mDataConnectionState=-1` — cellular 비활성. wifi off 시 RTDB 도달 불가 → ICE restart offer 전송 실패 (`NetworkException: ICE restart offer 전송 실패`) → networkLost 정상 종결 (정책대로)
+  - **C (A17, KT)**: `mServiceState=IN_SERVICE`, `registrationState=HOME`, `mDataConnectionState=2(CONNECTED)` — cellular 활성. wifi off → cellular fallback → ICE restart offer 전송 성공 → ice_restored
+  - 70s C 의 `ice_restored=2`: cellular auto-switch 시 (12:12:21) + wifi 복귀 시 (12:13:35) 두 번 PC disconnect → ICE restart 1회씩
+- **결론**: ✅ PASS (코드/메커니즘 정상)
+  - 1~6s 대칭 복구: 양쪽 ICE restart 1회 성공
+  - 15s/70s 비대칭: race 아닌 **A 의 LG U+ SIM 서비스 거부 (DENIED)** 가 결과 갈음. 코드 정책상 cellular 없으면 networkLost 정상 종결
+  - cellular handoff 메커니즘 (Android `NetworkCallback` + ICE restart) 정상 작동 — C 의 70s trace 에서 wifi → cellular → wifi 두 번 path switch 모두 1회 ICE restart 로 회복
 
 ### S17 — Senior wifi off + Family 2대 (2026-05-08)
 
